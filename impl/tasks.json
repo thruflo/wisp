@@ -290,7 +290,7 @@
       "Update session status to completed",
       "Write integration test for done flow"
     ],
-    "passes": false
+    "passes": true
   },
   {
     "category": "feature",

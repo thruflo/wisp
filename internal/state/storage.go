@@ -31,6 +31,11 @@ func (s *Store) sessionDir(branch string) string {
 	return filepath.Join(s.sessionsDir(), sanitizeBranch(branch))
 }
 
+// SessionDir returns the path to a specific session directory (public accessor).
+func (s *Store) SessionDir(branch string) string {
+	return s.sessionDir(branch)
+}
+
 // sanitizeBranch converts a branch name to a safe directory name.
 // Replaces "/" with "-" to avoid nested directories.
 func sanitizeBranch(branch string) string {
