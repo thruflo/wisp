@@ -271,7 +271,7 @@
       "Read-only mode, no TUI shortcuts",
       "Write integration tests for each command"
     ],
-    "passes": false
+    "passes": true
   },
   {
     "category": "feature",
