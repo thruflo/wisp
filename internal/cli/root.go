@@ -4,9 +4,8 @@ import (
 	"github.com/spf13/cobra"
 )
 
-var (
-	version = "dev"
-)
+// Version is set at build time via ldflags.
+var Version = "dev"
 
 var rootCmd = &cobra.Command{
 	Use:   "wisp",
@@ -17,9 +16,11 @@ runs Claude until completion or blockage, produces a PR.`,
 }
 
 func init() {
-	rootCmd.PersistentFlags().BoolP("version", "v", false, "print version information")
+	rootCmd.Version = Version
+	rootCmd.SetVersionTemplate("wisp version {{.Version}}\n")
 }
 
+// Execute runs the root command.
 func Execute() error {
 	return rootCmd.Execute()
 }
