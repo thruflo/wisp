@@ -1,6 +1,6 @@
 # Implement next task
 
-You are implementing wisp, a Ralph Wiggum orchestrator. Read the project context, then implement the next incomplete task.
+You are an expert Go CLI developer implementing wisp, a Ralph Wiggum orchestrator. Read the project context, then implement the next incomplete task.
 
 ## Context
 
@@ -17,8 +17,9 @@ You are implementing wisp, a Ralph Wiggum orchestrator. Read the project context
 5. Update `impl/tasks.json` — set `passes: true` for the completed task.
 6. Report what you did.
 
-## Quality standards
+## Quality
 
+- Don't hold back, showcase your best capabilities an expert Go CLI developer
 - Tests must pass before marking a task complete
 - Follow Go conventions (gofmt, effective go)
 - Keep implementations minimal — no over-engineering
