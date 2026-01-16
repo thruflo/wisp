@@ -1,0 +1,342 @@
+[
+  {
+    "category": "setup",
+    "description": "Initialize Go module with dependencies and directory structure",
+    "steps": [
+      "Create go.mod with module path github.com/thruflo/wisp",
+      "Add dependencies: github.com/superfly/sprites-go, golang.org/x/term, gopkg.in/yaml.v3",
+      "Create directory structure: cmd/wisp/, internal/config/, internal/sprite/, internal/state/, internal/loop/, internal/tui/, internal/cli/",
+      "Create main.go entry point in cmd/wisp/",
+      "Verify go build succeeds"
+    ],
+    "passes": false
+  },
+  {
+    "category": "feature",
+    "description": "Define core domain types for Task, State, and History",
+    "steps": [
+      "Create internal/state/types.go",
+      "Define Task struct with Category, Description, Steps, Passes fields",
+      "Define State struct with Status, Summary, Question, Error, Verification fields",
+      "Define Verification struct with Method, Passed, Details fields",
+      "Define History struct with Iteration, Summary, TasksCompleted, Status fields",
+      "Add JSON struct tags for all types",
+      "Write unit tests for JSON marshaling/unmarshaling in internal/state/types_test.go"
+    ],
+    "passes": false
+  },
+  {
+    "category": "feature",
+    "description": "Define Session and Config types",
+    "steps": [
+      "Create internal/config/types.go",
+      "Define Config struct with Limits (MaxIterations, MaxBudgetUSD, MaxDurationHours, NoProgressThreshold)",
+      "Define Settings struct for Claude Code settings.json format (Permissions.Deny, McpServers)",
+      "Define Session struct matching session.yaml schema (Repo, Spec, Siblings, Checkpoint, Branch, SpriteName, StartedAt, Status)",
+      "Add YAML struct tags for Config and Session",
+      "Add JSON struct tags for Settings",
+      "Write unit tests for YAML/JSON marshaling in internal/config/types_test.go"
+    ],
+    "passes": false
+  },
+  {
+    "category": "feature",
+    "description": "Implement config loading and validation",
+    "steps": [
+      "Create internal/config/loader.go",
+      "Implement LoadConfig to read and parse .wisp/config.yaml with sensible defaults",
+      "Implement LoadSettings to read and parse .wisp/settings.json",
+      "Implement LoadSession to read and parse .wisp/sessions/<branch>/session.yaml",
+      "Add validation: limits must be positive, required fields present",
+      "Implement LoadEnvFile to parse .wisp/.sprite.env into map[string]string",
+      "Write unit tests with valid/invalid config fixtures in internal/config/loader_test.go"
+    ],
+    "passes": false
+  },
+  {
+    "category": "feature",
+    "description": "Create Sprite client wrapper",
+    "steps": [
+      "Create internal/sprite/client.go",
+      "Define SpriteClient interface: Create, Execute, WriteFile, ReadFile, Delete",
+      "Implement SpriteClient using sprites-go SDK",
+      "Implement Create: create Sprite with optional checkpoint",
+      "Implement Execute: run command with dir, env, return stdout pipe for streaming",
+      "Implement WriteFile: write content to path using bash -c 'cat > path'",
+      "Implement ReadFile: read content from path using cat",
+      "Implement Delete: teardown Sprite",
+      "Implement SpriteName generation: wisp-<hash> from repo+branch",
+      "Write unit tests with mock Sprite client in internal/sprite/client_test.go"
+    ],
+    "passes": false
+  },
+  {
+    "category": "feature",
+    "description": "Implement local session storage",
+    "steps": [
+      "Create internal/state/storage.go",
+      "Implement SessionStore with base path .wisp/sessions/",
+      "Implement CreateSession: create session directory, write session.yaml",
+      "Implement GetSession: read session.yaml from branch directory",
+      "Implement ListSessions: enumerate session directories, return session list",
+      "Implement UpdateSession: update session.yaml fields",
+      "Implement SaveState: write state.json to session directory",
+      "Implement SaveTasks: write tasks.json to session directory",
+      "Implement SaveHistory: write history.json to session directory",
+      "Write unit tests using temp directories in internal/state/storage_test.go"
+    ],
+    "passes": false
+  },
+  {
+    "category": "feature",
+    "description": "Implement remote state sync between local and Sprite",
+    "steps": [
+      "Create internal/state/sync.go",
+      "Define SyncManager with SpriteClient and local SessionStore",
+      "Implement SyncToSprite: copy state.json, tasks.json, history.json from local to Sprite .wisp/",
+      "Implement SyncFromSprite: copy state.json, tasks.json, history.json from Sprite to local",
+      "Implement CopySettingsToSprite: copy settings.json to ~/.claude/settings.json on Sprite",
+      "Implement CopyTemplatesToSprite: copy templates/ to repo .wisp/ on Sprite",
+      "Implement WriteResponseToSprite: write response.json for NEEDS_INPUT flow",
+      "Write unit tests with mock Sprite client in internal/state/sync_test.go"
+    ],
+    "passes": false
+  },
+  {
+    "category": "feature",
+    "description": "Create CLI framework and init command",
+    "steps": [
+      "Create internal/cli/root.go with root command and global flags",
+      "Add --version flag",
+      "Create internal/cli/init.go",
+      "Implement wisp init: create .wisp/ directory structure",
+      "Generate default config.yaml with documented defaults",
+      "Generate default settings.json with credential deny rules and Playwright MCP",
+      "Create templates/default/ with placeholder prompt files (context.md, create-tasks.md, update-tasks.md, review-tasks.md, iterate.md)",
+      "Add --template flag to specify template name",
+      "Write integration test that runs init and verifies directory structure"
+    ],
+    "passes": false
+  },
+  {
+    "category": "feature",
+    "description": "Implement status command",
+    "steps": [
+      "Create internal/cli/status.go",
+      "Implement wisp status (no args): list all sessions with branch, status, task progress",
+      "Implement wisp status <branch>: show detailed session info",
+      "Display: repo, spec, branch, sprite name, started time, status",
+      "Display: task progress (completed/total), last state summary",
+      "Display: iteration count, time elapsed",
+      "Format output with aligned columns",
+      "Write unit tests with mock session storage"
+    ],
+    "passes": false
+  },
+  {
+    "category": "feature",
+    "description": "Implement TUI foundation with raw terminal mode",
+    "steps": [
+      "Create internal/tui/terminal.go",
+      "Implement raw mode setup/teardown using golang.org/x/term",
+      "Implement ANSI escape helpers: clear screen, move cursor, colors",
+      "Create internal/tui/input.go",
+      "Implement non-blocking key reader for shortcuts (t, a, d, k, esc)",
+      "Implement line input for NEEDS_INPUT responses",
+      "Create internal/tui/render.go",
+      "Implement box drawing and text rendering utilities",
+      "Write unit tests for ANSI escape generation"
+    ],
+    "passes": false
+  },
+  {
+    "category": "feature",
+    "description": "Implement TUI views for summary, tail, and input",
+    "steps": [
+      "Create internal/tui/views.go",
+      "Implement SummaryView: branch, iteration count, status, task progress, last summary, shortcuts",
+      "Implement TailView: scrolling output display with back shortcut",
+      "Implement InputView: question display, text input field, submit on enter",
+      "Create internal/tui/tui.go",
+      "Implement TUI struct that manages view switching and state",
+      "Implement Update method to refresh display on state change",
+      "Implement Run loop that handles key input and view transitions",
+      "Write manual test script to verify view rendering"
+    ],
+    "passes": false
+  },
+  {
+    "category": "feature",
+    "description": "Implement iteration loop mechanics",
+    "steps": [
+      "Create internal/loop/loop.go",
+      "Define Loop struct with SpriteClient, config, TUI reference",
+      "Implement Claude invocation: build command with flags (-p, --append-system-prompt-file, --dangerously-skip-permissions, --output-format stream-json, --max-turns, --max-budget-usd)",
+      "Implement output streaming: parse stream-json, forward to TUI tail view",
+      "Implement state reading: read state.json from Sprite after Claude exits",
+      "Implement exit condition checking: DONE, NEEDS_INPUT, BLOCKED, max iterations, max budget, max duration",
+      "Create internal/loop/stuck.go",
+      "Implement stuck detection: track tasks_completed in history.json, detect no progress for N iterations",
+      "Implement main loop: invoke Claude, check exit, sync state, repeat or stop",
+      "Write unit tests with mock Sprite client and state files"
+    ],
+    "passes": false
+  },
+  {
+    "category": "feature",
+    "description": "Implement start command",
+    "steps": [
+      "Create internal/cli/start.go",
+      "Parse flags: --repo (required), --spec (required), --sibling-repos, --branch, --template, --checkpoint",
+      "Generate branch name from spec if not provided: wisp/<slug>",
+      "Create Sprite (from checkpoint if specified)",
+      "Clone primary repo, create and checkout branch",
+      "Clone sibling repos to adjacent directories",
+      "Copy settings.json to ~/.claude/settings.json on Sprite",
+      "Copy templates to repo .wisp/ on Sprite",
+      "Inject env vars from .sprite.env",
+      "Run create-tasks prompt with RFC content to generate tasks.json",
+      "Create local session record",
+      "Start iteration loop with TUI",
+      "Write integration test for start command setup sequence"
+    ],
+    "passes": false
+  },
+  {
+    "category": "feature",
+    "description": "Implement resume command",
+    "steps": [
+      "Create internal/cli/resume.go",
+      "Parse args: branch name (required)",
+      "Load session from local .wisp/sessions/<branch>/",
+      "Create fresh Sprite (from checkpoint if specified in session)",
+      "Clone primary repo, checkout existing branch",
+      "Clone sibling repos",
+      "Copy settings, templates to Sprite",
+      "Copy local state files (state.json, tasks.json, history.json) to Sprite",
+      "Inject env vars",
+      "Update session status to running",
+      "Continue iteration loop with TUI",
+      "Write integration test for resume sequence"
+    ],
+    "passes": false
+  },
+  {
+    "category": "feature",
+    "description": "Implement update command for RFC reconciliation",
+    "steps": [
+      "Create internal/cli/update.go",
+      "Parse flags: --spec (required), --branch (required)",
+      "Load session from local storage",
+      "Read old RFC content from Sprite",
+      "Read new RFC content from local spec path",
+      "Generate diff between old and new RFC",
+      "Copy updated RFC to Sprite",
+      "Run update-tasks prompt with diff + current tasks.json",
+      "Agent outputs updated tasks.json with reconciliation tasks",
+      "Continue iteration loop with TUI",
+      "Write unit test for diff generation"
+    ],
+    "passes": false
+  },
+  {
+    "category": "feature",
+    "description": "Implement review command for PR feedback",
+    "steps": [
+      "Create internal/cli/review.go",
+      "Parse args: feedback.md path, --branch flag",
+      "Load session from local storage",
+      "Read feedback.md content",
+      "Copy feedback.md to Sprite",
+      "Run review-tasks prompt with feedback + current tasks.json",
+      "Agent outputs updated tasks.json with feedback-addressing tasks",
+      "Continue iteration loop with TUI",
+      "Write unit test for review flow"
+    ],
+    "passes": false
+  },
+  {
+    "category": "feature",
+    "description": "Implement attach, stop, and tail commands",
+    "steps": [
+      "Create internal/cli/attach.go",
+      "Implement wisp attach: shell out to 'sprite console <name>'",
+      "Restore terminal on exit",
+      "Create internal/cli/stop.go",
+      "Implement wisp stop: signal loop to stop gracefully",
+      "Sync state from Sprite to local before teardown",
+      "Update session status to stopped",
+      "Create internal/cli/tail.go",
+      "Implement wisp tail: connect to running session, stream Claude output",
+      "Read-only mode, no TUI shortcuts",
+      "Write integration tests for each command"
+    ],
+    "passes": false
+  },
+  {
+    "category": "feature",
+    "description": "Implement done command with PR creation",
+    "steps": [
+      "Create internal/cli/done.go",
+      "Parse args: optional branch name (uses current session if single)",
+      "Load session and verify status",
+      "Verify all tasks have passes: true",
+      "Copy divergence.md from Sprite to local .wisp/sessions/<branch>/",
+      "Push branch to remote",
+      "Prompt user: [p] push PR (auto) [m] push branch (manual) [c] cancel",
+      "Mode p: run Claude to generate PR title/body from task summaries, execute gh pr create",
+      "Mode m: open GitHub compare URL in browser",
+      "Teardown Sprite",
+      "Update session status to completed",
+      "Write integration test for done flow"
+    ],
+    "passes": false
+  },
+  {
+    "category": "feature",
+    "description": "Implement NEEDS_INPUT flow with response handling",
+    "steps": [
+      "Add NEEDS_INPUT handling to loop mechanics",
+      "When state.status == NEEDS_INPUT: pause loop, extract question",
+      "Display question in TUI InputView",
+      "Capture user response via line input",
+      "Write response to .wisp/response.json on Sprite",
+      "Resume loop - next iteration will read and delete response.json",
+      "Handle backgrounded mode: notify user of pending question",
+      "Write integration test for NEEDS_INPUT cycle"
+    ],
+    "passes": false
+  },
+  {
+    "category": "feature",
+    "description": "Implement notifications for TUI and backgrounded mode",
+    "steps": [
+      "Create internal/tui/notify.go",
+      "Implement terminal bell: write '\\a' to stdout",
+      "Implement macOS notification using osascript",
+      "Trigger bell on state change requiring attention (NEEDS_INPUT, BLOCKED, DONE)",
+      "Trigger macOS notification when backgrounded and attention needed",
+      "Add notification on loop completion",
+      "Write unit test for notification generation"
+    ],
+    "passes": false
+  },
+  {
+    "category": "test",
+    "description": "Write integration tests for full workflows",
+    "steps": [
+      "Create internal/integration/integration_test.go",
+      "Set up test fixtures: sample RFC, expected tasks",
+      "Test full init -> start -> done flow with mock Sprite",
+      "Test NEEDS_INPUT pause and resume cycle",
+      "Test update command with RFC changes",
+      "Test review command with feedback",
+      "Test state sync on task completion",
+      "Test stuck detection triggering BLOCKED",
+      "Test max iterations limit",
+      "Test Sprite failure handling (process exit without state.json)",
+      "Document test requirements for running against real Sprites"
+    ],
+    "passes": false
+  }
+]
