@@ -305,7 +305,7 @@
       "Handle backgrounded mode: notify user of pending question",
       "Write integration test for NEEDS_INPUT cycle"
     ],
-    "passes": false
+    "passes": true
   },
   {
     "category": "feature",
