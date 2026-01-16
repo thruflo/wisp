@@ -17,6 +17,14 @@ Point wisp at an RFC. Get a PR back.
 go install github.com/thruflo/wisp@latest
 ```
 
+### Local development
+
+```bash
+go install ./cmd/wisp
+```
+
+Rebuilds to `$GOPATH/bin`. Run again after changes.
+
 ## Setup
 
 ```bash
