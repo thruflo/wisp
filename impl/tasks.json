@@ -219,7 +219,7 @@
       "Continue iteration loop with TUI",
       "Write integration test for resume sequence"
     ],
-    "passes": false
+    "passes": true
   },
   {
     "category": "feature",
@@ -237,7 +237,7 @@
       "Continue iteration loop with TUI",
       "Write unit test for diff generation"
     ],
-    "passes": false
+    "passes": true
   },
   {
     "category": "feature",
