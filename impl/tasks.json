@@ -337,6 +337,6 @@
       "Test Sprite failure handling (process exit without state.json)",
       "Document test requirements for running against real Sprites"
     ],
-    "passes": false
+    "passes": true
   }
 ]
