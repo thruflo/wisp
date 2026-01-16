@@ -1,0 +1,547 @@
+package loop
+
+import (
+	"bufio"
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"path/filepath"
+	"strings"
+	"time"
+
+	"github.com/thruflo/wisp/internal/config"
+	"github.com/thruflo/wisp/internal/sprite"
+	"github.com/thruflo/wisp/internal/state"
+	"github.com/thruflo/wisp/internal/tui"
+)
+
+// ExitReason indicates why the loop stopped.
+type ExitReason int
+
+const (
+	ExitReasonUnknown       ExitReason = iota
+	ExitReasonDone                     // All tasks completed
+	ExitReasonNeedsInput               // Waiting for user input
+	ExitReasonBlocked                  // Agent reported blockage
+	ExitReasonMaxIterations            // Hit iteration limit
+	ExitReasonMaxBudget                // Hit budget limit
+	ExitReasonMaxDuration              // Hit duration limit
+	ExitReasonStuck                    // No progress for N iterations
+	ExitReasonUserKill                 // User killed session
+	ExitReasonBackground               // User backgrounded session
+	ExitReasonCrash                    // Claude crashed without state.json
+)
+
+// String returns a human-readable description of the exit reason.
+func (r ExitReason) String() string {
+	switch r {
+	case ExitReasonDone:
+		return "completed"
+	case ExitReasonNeedsInput:
+		return "needs input"
+	case ExitReasonBlocked:
+		return "blocked"
+	case ExitReasonMaxIterations:
+		return "max iterations"
+	case ExitReasonMaxBudget:
+		return "max budget"
+	case ExitReasonMaxDuration:
+		return "max duration"
+	case ExitReasonStuck:
+		return "stuck"
+	case ExitReasonUserKill:
+		return "user killed"
+	case ExitReasonBackground:
+		return "backgrounded"
+	case ExitReasonCrash:
+		return "crash"
+	default:
+		return "unknown"
+	}
+}
+
+// Result contains the outcome of a loop execution.
+type Result struct {
+	Reason     ExitReason
+	Iterations int
+	State      *state.State
+	Error      error
+}
+
+// Loop manages the Claude Code iteration loop.
+type Loop struct {
+	client      sprite.Client
+	sync        *state.SyncManager
+	store       *state.Store
+	cfg         *config.Config
+	session     *config.Session
+	tui         *tui.TUI
+	repoPath    string // Path on Sprite: /home/sprite/<org>/<repo>
+	wispPath    string // Path on Sprite: <repoPath>/.wisp
+	iteration   int
+	startTime   time.Time
+	templateDir string // Local path to templates
+}
+
+// NewLoop creates a new Loop instance.
+func NewLoop(
+	client sprite.Client,
+	syncMgr *state.SyncManager,
+	store *state.Store,
+	cfg *config.Config,
+	session *config.Session,
+	t *tui.TUI,
+	repoPath string,
+	templateDir string,
+) *Loop {
+	return &Loop{
+		client:      client,
+		sync:        syncMgr,
+		store:       store,
+		cfg:         cfg,
+		session:     session,
+		tui:         t,
+		repoPath:    repoPath,
+		wispPath:    filepath.Join(repoPath, ".wisp"),
+		templateDir: templateDir,
+	}
+}
+
+// Run executes the iteration loop until an exit condition is met.
+// It returns a Result indicating why the loop stopped.
+func (l *Loop) Run(ctx context.Context) Result {
+	l.startTime = time.Now()
+	l.iteration = l.getStartingIteration()
+
+	// Main loop
+	for {
+		// Check context cancellation
+		if ctx.Err() != nil {
+			return Result{Reason: ExitReasonBackground, Iterations: l.iteration}
+		}
+
+		// Check duration limit
+		if l.checkDurationLimit() {
+			return Result{Reason: ExitReasonMaxDuration, Iterations: l.iteration}
+		}
+
+		// Check iteration limit
+		if l.iteration >= l.cfg.Limits.MaxIterations {
+			return Result{Reason: ExitReasonMaxIterations, Iterations: l.iteration}
+		}
+
+		// Run one iteration
+		l.iteration++
+		l.updateTUIState()
+
+		iterResult, err := l.runIteration(ctx)
+		if err != nil {
+			// Check for user actions
+			if errors.Is(err, errUserKill) {
+				return Result{Reason: ExitReasonUserKill, Iterations: l.iteration}
+			}
+			if errors.Is(err, errUserBackground) {
+				return Result{Reason: ExitReasonBackground, Iterations: l.iteration}
+			}
+
+			// Claude crash or other error
+			return Result{
+				Reason:     ExitReasonCrash,
+				Iterations: l.iteration,
+				Error:      err,
+			}
+		}
+
+		// Sync state from Sprite to local storage
+		if err := l.sync.SyncFromSprite(ctx, l.session.SpriteName, l.session.Branch, l.repoPath); err != nil {
+			return Result{
+				Reason:     ExitReasonCrash,
+				Iterations: l.iteration,
+				Error:      fmt.Errorf("failed to sync state: %w", err),
+			}
+		}
+
+		// Record history
+		if err := l.recordHistory(ctx, iterResult); err != nil {
+			// Non-fatal, continue
+		}
+
+		// Check exit conditions based on state
+		switch iterResult.Status {
+		case state.StatusDone:
+			// Verify all tasks pass
+			if l.allTasksComplete() {
+				return Result{
+					Reason:     ExitReasonDone,
+					Iterations: l.iteration,
+					State:      iterResult,
+				}
+			}
+			// Not actually done, continue
+
+		case state.StatusNeedsInput:
+			// Handle user input
+			inputResult := l.handleNeedsInput(ctx, iterResult)
+			if inputResult.Reason != ExitReasonUnknown {
+				return inputResult
+			}
+			// Input provided, continue loop
+
+		case state.StatusBlocked:
+			return Result{
+				Reason:     ExitReasonBlocked,
+				Iterations: l.iteration,
+				State:      iterResult,
+			}
+		}
+
+		// Check stuck detection
+		if l.isStuck() {
+			return Result{
+				Reason:     ExitReasonStuck,
+				Iterations: l.iteration,
+				State:      iterResult,
+			}
+		}
+	}
+}
+
+// runIteration executes a single Claude Code invocation.
+func (l *Loop) runIteration(ctx context.Context) (*state.State, error) {
+	// Build Claude command
+	args := l.buildClaudeArgs()
+
+	// Execute on Sprite
+	cmd, err := l.client.Execute(ctx, l.session.SpriteName, l.repoPath, nil, args...)
+	if err != nil {
+		return nil, fmt.Errorf("failed to start Claude: %w", err)
+	}
+
+	// Stream output to TUI
+	errCh := make(chan error, 2)
+	go func() {
+		errCh <- l.streamOutput(ctx, cmd.Stdout)
+	}()
+	go func() {
+		errCh <- l.streamOutput(ctx, cmd.Stderr)
+	}()
+
+	// Create a channel to monitor user actions while streaming
+	actionCh := l.tui.Actions()
+	waitCh := make(chan error, 1)
+	go func() {
+		waitCh <- cmd.Wait()
+	}()
+
+	// Wait for completion or user action
+	for {
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+
+		case action := <-actionCh:
+			switch action.Action {
+			case tui.ActionKill:
+				return nil, errUserKill
+			case tui.ActionBackground, tui.ActionQuit:
+				return nil, errUserBackground
+			}
+
+		case err := <-waitCh:
+			// Command completed
+			<-errCh // Wait for stdout
+			<-errCh // Wait for stderr
+
+			if err != nil {
+				// Check exit code - non-zero might be okay if state.json exists
+				if cmd.ExitCode() != 0 {
+					// Try to read state anyway
+				}
+			}
+
+			// Read state.json from Sprite
+			st, err := l.readStateFromSprite(ctx)
+			if err != nil {
+				return nil, fmt.Errorf("failed to read state after iteration: %w", err)
+			}
+			return st, nil
+		}
+	}
+}
+
+// buildClaudeArgs constructs the Claude command line arguments.
+func (l *Loop) buildClaudeArgs() []string {
+	iteratePath := filepath.Join(l.wispPath, "iterate.md")
+	contextPath := filepath.Join(l.wispPath, "context.md")
+
+	args := []string{
+		"claude",
+		"-p", fmt.Sprintf("$(cat %s)", iteratePath),
+		"--append-system-prompt-file", contextPath,
+		"--dangerously-skip-permissions",
+		"--output-format", "stream-json",
+		"--max-turns", "100",
+	}
+
+	// Add budget limit if configured
+	if l.cfg.Limits.MaxBudgetUSD > 0 {
+		args = append(args, "--max-budget-usd", fmt.Sprintf("%.2f", l.cfg.Limits.MaxBudgetUSD))
+	}
+
+	return args
+}
+
+// streamOutput reads from a reader and sends lines to the TUI.
+func (l *Loop) streamOutput(ctx context.Context, r io.ReadCloser) error {
+	if r == nil {
+		return nil
+	}
+	defer r.Close()
+
+	scanner := bufio.NewScanner(r)
+	// Set a larger buffer for potentially long JSON lines
+	buf := make([]byte, 64*1024)
+	scanner.Buffer(buf, 1024*1024)
+
+	for scanner.Scan() {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		default:
+		}
+
+		line := scanner.Text()
+		// Parse stream-json format and extract display text
+		displayLine := l.parseStreamJSON(line)
+		if displayLine != "" {
+			l.tui.AppendTailLine(displayLine)
+			l.tui.Update()
+		}
+	}
+
+	return scanner.Err()
+}
+
+// StreamMessage represents a Claude stream-json output message.
+type StreamMessage struct {
+	Type    string `json:"type"`
+	Content string `json:"content,omitempty"`
+	Tool    string `json:"tool,omitempty"`
+	Message string `json:"message,omitempty"`
+	Result  string `json:"result,omitempty"`
+}
+
+// parseStreamJSON extracts display text from a stream-json line.
+func (l *Loop) parseStreamJSON(line string) string {
+	line = strings.TrimSpace(line)
+	if line == "" {
+		return ""
+	}
+
+	// Try to parse as JSON
+	var msg StreamMessage
+	if err := json.Unmarshal([]byte(line), &msg); err != nil {
+		// Not JSON, return as-is
+		return line
+	}
+
+	// Format based on message type
+	switch msg.Type {
+	case "assistant":
+		return msg.Content
+	case "tool_use":
+		return fmt.Sprintf("[%s] %s", msg.Tool, msg.Message)
+	case "tool_result":
+		// Truncate long results
+		result := msg.Result
+		if len(result) > 200 {
+			result = result[:200] + "..."
+		}
+		return result
+	case "error":
+		return fmt.Sprintf("ERROR: %s", msg.Message)
+	default:
+		// Return content if present
+		if msg.Content != "" {
+			return msg.Content
+		}
+		if msg.Message != "" {
+			return msg.Message
+		}
+	}
+
+	return ""
+}
+
+// readStateFromSprite reads state.json from the Sprite.
+func (l *Loop) readStateFromSprite(ctx context.Context) (*state.State, error) {
+	statePath := filepath.Join(l.wispPath, "state.json")
+	data, err := l.client.ReadFile(ctx, l.session.SpriteName, statePath)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read state.json: %w", err)
+	}
+
+	var st state.State
+	if err := json.Unmarshal(data, &st); err != nil {
+		return nil, fmt.Errorf("failed to parse state.json: %w", err)
+	}
+
+	return &st, nil
+}
+
+// recordHistory appends a history entry for the current iteration.
+func (l *Loop) recordHistory(ctx context.Context, st *state.State) error {
+	tasks, err := l.store.LoadTasks(l.session.Branch)
+	if err != nil {
+		return err
+	}
+
+	completed := 0
+	for _, t := range tasks {
+		if t.Passes {
+			completed++
+		}
+	}
+
+	entry := state.History{
+		Iteration:      l.iteration,
+		Summary:        st.Summary,
+		TasksCompleted: completed,
+		Status:         st.Status,
+	}
+
+	return l.store.AppendHistory(l.session.Branch, entry)
+}
+
+// handleNeedsInput handles the NEEDS_INPUT state.
+func (l *Loop) handleNeedsInput(ctx context.Context, st *state.State) Result {
+	// Show input view
+	l.tui.ShowInput(st.Question)
+	l.tui.Bell()
+	l.tui.Update()
+
+	// Wait for user input
+	for {
+		select {
+		case <-ctx.Done():
+			return Result{Reason: ExitReasonBackground, Iterations: l.iteration}
+
+		case action := <-l.tui.Actions():
+			switch action.Action {
+			case tui.ActionSubmitInput:
+				// Write response to Sprite
+				if err := l.sync.WriteResponseToSprite(ctx, l.session.SpriteName, l.repoPath, action.Input); err != nil {
+					return Result{
+						Reason:     ExitReasonCrash,
+						Iterations: l.iteration,
+						Error:      fmt.Errorf("failed to write response: %w", err),
+					}
+				}
+				// Continue loop
+				return Result{Reason: ExitReasonUnknown}
+
+			case tui.ActionCancelInput:
+				// Stay in NEEDS_INPUT state, user cancelled
+				l.tui.SetView(tui.ViewSummary)
+				l.tui.Update()
+				return Result{Reason: ExitReasonNeedsInput, Iterations: l.iteration, State: st}
+
+			case tui.ActionKill:
+				return Result{Reason: ExitReasonUserKill, Iterations: l.iteration}
+
+			case tui.ActionBackground, tui.ActionQuit:
+				return Result{Reason: ExitReasonBackground, Iterations: l.iteration}
+			}
+		}
+	}
+}
+
+// getStartingIteration returns the iteration number to start from.
+// This is based on the history length if resuming.
+func (l *Loop) getStartingIteration() int {
+	history, err := l.store.LoadHistory(l.session.Branch)
+	if err != nil || len(history) == 0 {
+		return 0
+	}
+	return history[len(history)-1].Iteration
+}
+
+// updateTUIState updates the TUI with current state.
+func (l *Loop) updateTUIState() {
+	tasks, _ := l.store.LoadTasks(l.session.Branch)
+	completed := 0
+	for _, t := range tasks {
+		if t.Passes {
+			completed++
+		}
+	}
+
+	lastState, _ := l.store.LoadState(l.session.Branch)
+	summary := ""
+	status := "RUNNING"
+	errMsg := ""
+	if lastState != nil {
+		summary = lastState.Summary
+		status = lastState.Status
+		errMsg = lastState.Error
+	}
+
+	viewState := tui.ViewState{
+		Branch:         l.session.Branch,
+		Iteration:      l.iteration,
+		MaxIterations:  l.cfg.Limits.MaxIterations,
+		Status:         status,
+		CompletedTasks: completed,
+		TotalTasks:     len(tasks),
+		LastSummary:    summary,
+		Error:          errMsg,
+	}
+
+	l.tui.SetState(viewState)
+	l.tui.Update()
+}
+
+// checkDurationLimit checks if the max duration has been exceeded.
+func (l *Loop) checkDurationLimit() bool {
+	if l.cfg.Limits.MaxDurationHours <= 0 {
+		return false
+	}
+	maxDuration := time.Duration(l.cfg.Limits.MaxDurationHours * float64(time.Hour))
+	return time.Since(l.startTime) >= maxDuration
+}
+
+// allTasksComplete checks if all tasks have passes: true.
+func (l *Loop) allTasksComplete() bool {
+	tasks, err := l.store.LoadTasks(l.session.Branch)
+	if err != nil {
+		return false
+	}
+	for _, t := range tasks {
+		if !t.Passes {
+			return false
+		}
+	}
+	return len(tasks) > 0
+}
+
+// isStuck checks if the loop is stuck (no progress for N iterations).
+func (l *Loop) isStuck() bool {
+	if l.cfg.Limits.NoProgressThreshold <= 0 {
+		return false
+	}
+
+	history, err := l.store.LoadHistory(l.session.Branch)
+	if err != nil || len(history) < l.cfg.Limits.NoProgressThreshold {
+		return false
+	}
+
+	return DetectStuck(history, l.cfg.Limits.NoProgressThreshold)
+}
+
+// Sentinel errors for user actions.
+var (
+	errUserKill       = errors.New("user killed session")
+	errUserBackground = errors.New("user backgrounded session")
+)

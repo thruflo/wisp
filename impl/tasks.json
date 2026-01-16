@@ -9,7 +9,7 @@
       "Create main.go entry point in cmd/wisp/",
       "Verify go build succeeds"
     ],
-    "passes": false
+    "passes": true
   },
   {
     "category": "feature",
@@ -23,7 +23,7 @@
       "Add JSON struct tags for all types",
       "Write unit tests for JSON marshaling/unmarshaling in internal/state/types_test.go"
     ],
-    "passes": false
+    "passes": true
   },
   {
     "category": "feature",
@@ -37,7 +37,7 @@
       "Add JSON struct tags for Settings",
       "Write unit tests for YAML/JSON marshaling in internal/config/types_test.go"
     ],
-    "passes": false
+    "passes": true
   },
   {
     "category": "feature",
@@ -51,7 +51,7 @@
       "Implement LoadEnvFile to parse .wisp/.sprite.env into map[string]string",
       "Write unit tests with valid/invalid config fixtures in internal/config/loader_test.go"
     ],
-    "passes": false
+    "passes": true
   },
   {
     "category": "feature",
@@ -68,7 +68,7 @@
       "Implement SpriteName generation: wisp-<hash> from repo+branch",
       "Write unit tests with mock Sprite client in internal/sprite/client_test.go"
     ],
-    "passes": false
+    "passes": true
   },
   {
     "category": "feature",
@@ -85,7 +85,7 @@
       "Implement SaveHistory: write history.json to session directory",
       "Write unit tests using temp directories in internal/state/storage_test.go"
     ],
-    "passes": false
+    "passes": true
   },
   {
     "category": "feature",
@@ -100,7 +100,7 @@
       "Implement WriteResponseToSprite: write response.json for NEEDS_INPUT flow",
       "Write unit tests with mock Sprite client in internal/state/sync_test.go"
     ],
-    "passes": false
+    "passes": true
   },
   {
     "category": "feature",
@@ -116,7 +116,7 @@
       "Add --template flag to specify template name",
       "Write integration test that runs init and verifies directory structure"
     ],
-    "passes": false
+    "passes": true
   },
   {
     "category": "feature",
@@ -131,7 +131,7 @@
       "Format output with aligned columns",
       "Write unit tests with mock session storage"
     ],
-    "passes": false
+    "passes": true
   },
   {
     "category": "feature",
@@ -147,7 +147,7 @@
       "Implement box drawing and text rendering utilities",
       "Write unit tests for ANSI escape generation"
     ],
-    "passes": false
+    "passes": true
   },
   {
     "category": "feature",
@@ -163,7 +163,7 @@
       "Implement Run loop that handles key input and view transitions",
       "Write manual test script to verify view rendering"
     ],
-    "passes": false
+    "passes": true
   },
   {
     "category": "feature",
@@ -180,7 +180,7 @@
       "Implement main loop: invoke Claude, check exit, sync state, repeat or stop",
       "Write unit tests with mock Sprite client and state files"
     ],
-    "passes": false
+    "passes": true
   },
   {
     "category": "feature",
