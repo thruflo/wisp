@@ -9,6 +9,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"github.com/thruflo/wisp/internal/auth"
 	"github.com/thruflo/wisp/internal/config"
 	"github.com/thruflo/wisp/internal/state"
 )
@@ -280,4 +281,95 @@ func TestResumeCommand_ContextCancellation(t *testing.T) {
 
 	// Verify context is cancelled
 	assert.Error(t, ctx.Err())
+}
+
+func TestResumeServerFlagsRegistered(t *testing.T) {
+	// Verify the --server flag is registered on the resume command
+	serverFlag := resumeCmd.Flags().Lookup("server")
+	require.NotNil(t, serverFlag, "--server flag should be registered")
+	assert.Equal(t, "bool", serverFlag.Value.Type())
+	assert.Equal(t, "false", serverFlag.DefValue)
+	assert.Contains(t, serverFlag.Usage, "web server")
+
+	// Verify the --port flag is registered on the resume command
+	portFlag := resumeCmd.Flags().Lookup("port")
+	require.NotNil(t, portFlag, "--port flag should be registered")
+	assert.Equal(t, "int", portFlag.Value.Type())
+	assert.Equal(t, "8374", portFlag.DefValue)
+	assert.Contains(t, portFlag.Usage, "port")
+
+	// Verify the --password flag is registered on the resume command
+	passwordFlag := resumeCmd.Flags().Lookup("password")
+	require.NotNil(t, passwordFlag, "--password flag should be registered")
+	assert.Equal(t, "bool", passwordFlag.Value.Type())
+	assert.Equal(t, "false", passwordFlag.DefValue)
+	assert.Contains(t, passwordFlag.Usage, "password")
+}
+
+func TestHandleResumeServerPassword_NoServerConfig(t *testing.T) {
+	// Test that handleResumeServerPassword creates server config if missing
+	tmpDir := t.TempDir()
+	wispDir := filepath.Join(tmpDir, ".wisp")
+	require.NoError(t, os.MkdirAll(wispDir, 0o755))
+
+	cfg := &config.Config{
+		Limits: config.DefaultLimits(),
+	}
+
+	// Not enabling server, not setting password - should be no-op
+	err := handleResumeServerPassword(tmpDir, cfg, false, false, 9000)
+	require.NoError(t, err)
+	// Server config should still be initialized since function was called
+	assert.NotNil(t, cfg.Server)
+	assert.Equal(t, 9000, cfg.Server.Port)
+	assert.Empty(t, cfg.Server.PasswordHash)
+}
+
+func TestHandleResumeServerPassword_WithExistingPassword(t *testing.T) {
+	// Test that handleResumeServerPassword doesn't prompt when password exists
+	tmpDir := t.TempDir()
+	wispDir := filepath.Join(tmpDir, ".wisp")
+	require.NoError(t, os.MkdirAll(wispDir, 0o755))
+
+	// Create config with existing password hash
+	existingHash, err := auth.HashPassword("existingpassword")
+	require.NoError(t, err)
+
+	cfg := &config.Config{
+		Limits: config.DefaultLimits(),
+		Server: &config.ServerConfig{
+			Port:         8374,
+			PasswordHash: existingHash,
+		},
+	}
+
+	// Server enabled but password already set - should not prompt (no error)
+	err = handleResumeServerPassword(tmpDir, cfg, true, false, 8080)
+	require.NoError(t, err)
+	// Port should be updated, but password hash should be unchanged
+	assert.Equal(t, 8080, cfg.Server.Port)
+	assert.Equal(t, existingHash, cfg.Server.PasswordHash)
+}
+
+func TestHandleResumeServerPassword_PortUpdated(t *testing.T) {
+	// Test that port is updated even when no password change needed
+	tmpDir := t.TempDir()
+	wispDir := filepath.Join(tmpDir, ".wisp")
+	require.NoError(t, os.MkdirAll(wispDir, 0o755))
+
+	existingHash, err := auth.HashPassword("testpassword")
+	require.NoError(t, err)
+
+	cfg := &config.Config{
+		Limits: config.DefaultLimits(),
+		Server: &config.ServerConfig{
+			Port:         8374,
+			PasswordHash: existingHash,
+		},
+	}
+
+	// Enable server with different port, password already set
+	err = handleResumeServerPassword(tmpDir, cfg, true, false, 9999)
+	require.NoError(t, err)
+	assert.Equal(t, 9999, cfg.Server.Port)
 }

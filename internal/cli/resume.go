@@ -8,11 +8,18 @@ import (
 	"strings"
 
 	"github.com/spf13/cobra"
+	"github.com/thruflo/wisp/internal/auth"
 	"github.com/thruflo/wisp/internal/config"
 	"github.com/thruflo/wisp/internal/loop"
 	"github.com/thruflo/wisp/internal/sprite"
 	"github.com/thruflo/wisp/internal/state"
 	"github.com/thruflo/wisp/internal/tui"
+)
+
+var (
+	resumeServer      bool
+	resumeServerPort  int
+	resumeSetPassword bool
 )
 
 var resumeCmd = &cobra.Command{
@@ -31,6 +38,10 @@ Example:
 }
 
 func init() {
+	resumeCmd.Flags().BoolVar(&resumeServer, "server", false, "start web server alongside TUI for remote access")
+	resumeCmd.Flags().IntVar(&resumeServerPort, "port", config.DefaultServerPort, "web server port (requires --server)")
+	resumeCmd.Flags().BoolVar(&resumeSetPassword, "password", false, "prompt to set/change web server password")
+
 	rootCmd.AddCommand(resumeCmd)
 }
 
@@ -60,6 +71,13 @@ func runResume(cmd *cobra.Command, args []string) error {
 	cfg, err := config.LoadConfig(cwd)
 	if err != nil {
 		return fmt.Errorf("failed to load config: %w", err)
+	}
+
+	// Handle server mode and password setup
+	if resumeServer || resumeSetPassword {
+		if err := handleResumeServerPassword(cwd, cfg, resumeServer, resumeSetPassword, resumeServerPort); err != nil {
+			return err
+		}
 	}
 
 	// Load settings
@@ -352,6 +370,52 @@ func checkoutBranch(ctx context.Context, client sprite.Client, spriteName, repoP
 	}
 	if exitCode != 0 {
 		return fmt.Errorf("checkout failed with exit code %d: %s", exitCode, string(stderr))
+	}
+
+	return nil
+}
+
+// handleResumeServerPassword handles password setup for the web server on resume.
+// It prompts for a password if needed and saves the hash to config.
+func handleResumeServerPassword(basePath string, cfg *config.Config, serverEnabled, setPassword bool, port int) error {
+	// Initialize server config if not present
+	if cfg.Server == nil {
+		cfg.Server = config.DefaultServerConfig()
+	}
+
+	// Update port from flag
+	cfg.Server.Port = port
+
+	// Check if we need to prompt for password
+	needsPassword := false
+
+	if setPassword {
+		// User explicitly wants to set/change password
+		needsPassword = true
+	} else if serverEnabled && cfg.Server.PasswordHash == "" {
+		// Server mode enabled but no password configured
+		needsPassword = true
+	}
+
+	if needsPassword {
+		password, err := auth.PromptAndConfirmPassword()
+		if err != nil {
+			return fmt.Errorf("password setup failed: %w", err)
+		}
+
+		hash, err := auth.HashPassword(password)
+		if err != nil {
+			return fmt.Errorf("failed to hash password: %w", err)
+		}
+
+		cfg.Server.PasswordHash = hash
+
+		// Save the updated config
+		if err := config.SaveConfig(basePath, cfg); err != nil {
+			return fmt.Errorf("failed to save config: %w", err)
+		}
+
+		fmt.Println("Password saved to config.")
 	}
 
 	return nil
