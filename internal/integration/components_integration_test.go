@@ -30,13 +30,11 @@
 package integration
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"io"
 	"os"
 	"path/filepath"
-	"sync"
 	"testing"
 	"time"
 
@@ -110,138 +108,6 @@ var expectedTasks = []state.Task{
 		Steps:       []string{"Write test cases", "Verify coverage"},
 		Passes:      false,
 	},
-}
-
-// MockSpriteClient implements sprite.Client for integration testing.
-// It provides fine-grained control over command execution results and file system state.
-type MockSpriteClient struct {
-	mu sync.Mutex
-
-	// File system state
-	files map[string][]byte
-
-	// Command execution control
-	executeFunc func(ctx context.Context, name string, dir string, env []string, args ...string) (*sprite.Cmd, error)
-
-	// Tracking
-	createCalls  []createCall
-	deleteCalls  []string
-	executeCalls []executeCall
-	writeCalls   []writeCall
-	readCalls    []readCall
-}
-
-type createCall struct {
-	name       string
-	checkpoint string
-}
-
-type executeCall struct {
-	name string
-	dir  string
-	env  []string
-	args []string
-}
-
-type writeCall struct {
-	name    string
-	path    string
-	content []byte
-}
-
-type readCall struct {
-	name string
-	path string
-}
-
-func NewMockSpriteClient() *MockSpriteClient {
-	return &MockSpriteClient{
-		files: make(map[string][]byte),
-	}
-}
-
-func (m *MockSpriteClient) Create(ctx context.Context, name string, checkpoint string) error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	m.createCalls = append(m.createCalls, createCall{name: name, checkpoint: checkpoint})
-	return nil
-}
-
-func (m *MockSpriteClient) Delete(ctx context.Context, name string) error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	m.deleteCalls = append(m.deleteCalls, name)
-	return nil
-}
-
-func (m *MockSpriteClient) Exists(ctx context.Context, name string) (bool, error) {
-	return true, nil
-}
-
-func (m *MockSpriteClient) Execute(ctx context.Context, name string, dir string, env []string, args ...string) (*sprite.Cmd, error) {
-	m.mu.Lock()
-	m.executeCalls = append(m.executeCalls, executeCall{name: name, dir: dir, env: env, args: args})
-	execFn := m.executeFunc
-	m.mu.Unlock()
-
-	if execFn != nil {
-		return execFn(ctx, name, dir, env, args...)
-	}
-
-	// Default: return a successful command
-	return &sprite.Cmd{
-		Stdout: io.NopCloser(bytes.NewBuffer(nil)),
-		Stderr: io.NopCloser(bytes.NewBuffer(nil)),
-	}, nil
-}
-
-func (m *MockSpriteClient) WriteFile(ctx context.Context, name string, path string, content []byte) error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	m.writeCalls = append(m.writeCalls, writeCall{name: name, path: path, content: content})
-	m.files[path] = content
-	return nil
-}
-
-func (m *MockSpriteClient) ReadFile(ctx context.Context, name string, path string) ([]byte, error) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	m.readCalls = append(m.readCalls, readCall{name: name, path: path})
-	if content, ok := m.files[path]; ok {
-		return content, nil
-	}
-	return nil, io.EOF
-}
-
-// SetFile sets a file in the mock filesystem.
-func (m *MockSpriteClient) SetFile(path string, content []byte) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	m.files[path] = content
-}
-
-// GetFile gets a file from the mock filesystem.
-func (m *MockSpriteClient) GetFile(path string) ([]byte, bool) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	content, ok := m.files[path]
-	return content, ok
-}
-
-// SetExecuteFunc sets a custom execute function.
-func (m *MockSpriteClient) SetExecuteFunc(fn func(ctx context.Context, name string, dir string, env []string, args ...string) (*sprite.Cmd, error)) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	m.executeFunc = fn
-}
-
-// GetExecuteCalls returns the recorded execute calls.
-func (m *MockSpriteClient) GetExecuteCalls() []executeCall {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	result := make([]executeCall, len(m.executeCalls))
-	copy(result, m.executeCalls)
-	return result
 }
 
 // Test Helpers
@@ -335,7 +201,7 @@ func TestFullInitStartDoneFlow(t *testing.T) {
 	session := createTestSession(t, store, branch)
 
 	// Setup mock client
-	mockClient := NewMockSpriteClient()
+	mockClient := sprite.NewMockSpriteClient()
 	repoPath := "/home/sprite/test-org/test-repo"
 
 	// Set up initial state files that would be created during start
@@ -416,7 +282,7 @@ func TestNeedsInputPauseAndResumeCycle(t *testing.T) {
 	session := createTestSession(t, store, branch)
 
 	// Setup mock client
-	mockClient := NewMockSpriteClient()
+	mockClient := sprite.NewMockSpriteClient()
 	repoPath := "/home/sprite/test-org/test-repo"
 
 	// Set up tasks
@@ -490,7 +356,7 @@ func TestUpdateCommandWithRFCChanges(t *testing.T) {
 	session := createTestSession(t, store, branch)
 
 	// Setup mock client
-	mockClient := NewMockSpriteClient()
+	mockClient := sprite.NewMockSpriteClient()
 	repoPath := "/home/sprite/test-org/test-repo"
 
 	// Set up original RFC on Sprite
@@ -561,7 +427,7 @@ func TestReviewCommandWithFeedback(t *testing.T) {
 	session := createTestSession(t, store, branch)
 
 	// Setup mock client
-	mockClient := NewMockSpriteClient()
+	mockClient := sprite.NewMockSpriteClient()
 	repoPath := "/home/sprite/test-org/test-repo"
 
 	// Set up existing tasks (all completed)
@@ -633,7 +499,7 @@ func TestStateSyncOnTaskCompletion(t *testing.T) {
 	session := createTestSession(t, store, branch)
 
 	// Setup mock client
-	mockClient := NewMockSpriteClient()
+	mockClient := sprite.NewMockSpriteClient()
 	repoPath := "/home/sprite/test-org/test-repo"
 
 	// Set up initial state (one task incomplete)
@@ -757,7 +623,7 @@ func TestMaxIterationsLimit(t *testing.T) {
 	require.NoError(t, store.SaveTasks(branch, tasks))
 
 	// Setup mock client
-	mockClient := NewMockSpriteClient()
+	mockClient := sprite.NewMockSpriteClient()
 	repoPath := "/home/sprite/test-org/test-repo"
 
 	// Set up state that allows iteration
@@ -813,7 +679,7 @@ func TestSpriteFailureHandling(t *testing.T) {
 	require.NoError(t, store.SaveTasks(branch, tasks))
 
 	// Setup mock client that simulates crash (no state.json after command)
-	mockClient := NewMockSpriteClient()
+	mockClient := sprite.NewMockSpriteClient()
 	repoPath := "/home/sprite/test-org/test-repo"
 
 	// Don't set state.json - simulating Claude crash
