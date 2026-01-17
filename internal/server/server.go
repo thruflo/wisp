@@ -40,8 +40,10 @@ type Server struct {
 	// Durable Streams
 	streams *StreamManager
 
-	// Pending user inputs from web client
-	pendingInputs map[string]string // request_id -> response
+	// Input handling
+	inputMu          sync.Mutex
+	pendingInputs    map[string]string // request_id -> response
+	respondedInputs  map[string]bool   // request_id -> true if already responded
 
 	// Static assets filesystem
 	assets fs.FS
@@ -501,6 +503,8 @@ func formatJSONResponse(messages []store.Message) []byte {
 }
 
 // handleInput handles POST /input for user responses.
+// Implements first-response-wins: if the request has already been responded to
+// (either from web or TUI), subsequent responses are rejected.
 func (s *Server) handleInput(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -528,15 +532,41 @@ func (s *Server) handleInput(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Store the input response for the session to handle
-	// Note: Actual implementation of writing to response.json will be done
-	// in the loop integration task. For now, we just acknowledge receipt.
-	s.mu.Lock()
+	// Use inputMu for input-specific operations (first-response-wins)
+	s.inputMu.Lock()
+
+	// Check if this request has already been responded to
+	if s.respondedInputs != nil && s.respondedInputs[req.RequestID] {
+		s.inputMu.Unlock()
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusConflict)
+		fmt.Fprintf(w, `{"status":"already_responded"}`)
+		return
+	}
+
+	// Initialize maps if needed
 	if s.pendingInputs == nil {
 		s.pendingInputs = make(map[string]string)
 	}
+	if s.respondedInputs == nil {
+		s.respondedInputs = make(map[string]bool)
+	}
+
+	// Mark as responded and store the response
+	s.respondedInputs[req.RequestID] = true
 	s.pendingInputs[req.RequestID] = req.Response
-	s.mu.Unlock()
+	s.inputMu.Unlock()
+
+	// Broadcast that this input request has been responded to
+	// This allows web clients to see the updated state immediately
+	if s.streams != nil {
+		inputReq := &InputRequest{
+			ID:        req.RequestID,
+			Responded: true,
+			Response:  &req.Response,
+		}
+		s.streams.BroadcastInputRequest(inputReq)
+	}
 
 	// Return success
 	w.Header().Set("Content-Type", "application/json")
@@ -545,9 +575,10 @@ func (s *Server) handleInput(w http.ResponseWriter, r *http.Request) {
 }
 
 // GetPendingInput retrieves and removes a pending input response.
+// This is called by the loop when polling for web client input.
 func (s *Server) GetPendingInput(requestID string) (string, bool) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	s.inputMu.Lock()
+	defer s.inputMu.Unlock()
 	if s.pendingInputs == nil {
 		return "", false
 	}
@@ -556,6 +587,28 @@ func (s *Server) GetPendingInput(requestID string) (string, bool) {
 		delete(s.pendingInputs, requestID)
 	}
 	return response, ok
+}
+
+// MarkInputResponded marks an input request as responded.
+// This is called by the loop when the TUI provides input, to prevent
+// subsequent web client responses from being accepted.
+func (s *Server) MarkInputResponded(requestID string) {
+	s.inputMu.Lock()
+	defer s.inputMu.Unlock()
+	if s.respondedInputs == nil {
+		s.respondedInputs = make(map[string]bool)
+	}
+	s.respondedInputs[requestID] = true
+}
+
+// IsInputResponded checks if an input request has already been responded to.
+func (s *Server) IsInputResponded(requestID string) bool {
+	s.inputMu.Lock()
+	defer s.inputMu.Unlock()
+	if s.respondedInputs == nil {
+		return false
+	}
+	return s.respondedInputs[requestID]
 }
 
 // handleStatic handles GET requests for serving static web assets.

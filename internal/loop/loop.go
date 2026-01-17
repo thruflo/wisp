@@ -674,6 +674,10 @@ func (l *Loop) handleNeedsInput(ctx context.Context, st *state.State) Result {
 		case action := <-l.tui.Actions():
 			switch action.Action {
 			case tui.ActionSubmitInput:
+				// Mark as responded in server first (for first-response-wins)
+				if l.server != nil && requestID != "" {
+					l.server.MarkInputResponded(requestID)
+				}
 				// Write response to Sprite
 				if err := l.sync.WriteResponseToSprite(ctx, l.session.SpriteName, action.Input); err != nil {
 					return Result{

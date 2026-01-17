@@ -901,6 +901,184 @@ func TestPendingInputConcurrency(t *testing.T) {
 	wg.Wait()
 }
 
+func TestInputFirstResponseWins(t *testing.T) {
+	server := createTestServer(t)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	go func() {
+		server.Start(ctx)
+	}()
+
+	time.Sleep(50 * time.Millisecond)
+	defer server.Stop()
+
+	addr := server.ListenAddr()
+	token := getAuthToken(t, addr)
+
+	t.Run("first response succeeds", func(t *testing.T) {
+		// First response should succeed
+		body := `{"request_id": "first-wins-123", "response": "first response"}`
+		req, _ := http.NewRequest("POST", "http://"+addr+"/input", strings.NewReader(body))
+		req.Header.Set("Authorization", "Bearer "+token)
+		req.Header.Set("Content-Type", "application/json")
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatalf("failed to make request: %v", err)
+		}
+		defer resp.Body.Close()
+
+		if resp.StatusCode != http.StatusOK {
+			t.Errorf("expected status %d, got %d", http.StatusOK, resp.StatusCode)
+		}
+
+		var result struct {
+			Status string `json:"status"`
+		}
+		if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+			t.Fatalf("failed to decode response: %v", err)
+		}
+		if result.Status != "received" {
+			t.Errorf("expected status 'received', got '%s'", result.Status)
+		}
+	})
+
+	t.Run("second response rejected with 409 Conflict", func(t *testing.T) {
+		// Second response to same request_id should fail with 409 Conflict
+		body := `{"request_id": "first-wins-123", "response": "second response"}`
+		req, _ := http.NewRequest("POST", "http://"+addr+"/input", strings.NewReader(body))
+		req.Header.Set("Authorization", "Bearer "+token)
+		req.Header.Set("Content-Type", "application/json")
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatalf("failed to make request: %v", err)
+		}
+		defer resp.Body.Close()
+
+		if resp.StatusCode != http.StatusConflict {
+			t.Errorf("expected status %d (Conflict), got %d", http.StatusConflict, resp.StatusCode)
+		}
+
+		var result struct {
+			Status string `json:"status"`
+		}
+		if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+			t.Fatalf("failed to decode response: %v", err)
+		}
+		if result.Status != "already_responded" {
+			t.Errorf("expected status 'already_responded', got '%s'", result.Status)
+		}
+	})
+}
+
+func TestInputMarkResponded(t *testing.T) {
+	server := createTestServer(t)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	go func() {
+		server.Start(ctx)
+	}()
+
+	time.Sleep(50 * time.Millisecond)
+	defer server.Stop()
+
+	addr := server.ListenAddr()
+	token := getAuthToken(t, addr)
+
+	t.Run("MarkInputResponded blocks subsequent web input", func(t *testing.T) {
+		reqID := "tui-first-123"
+
+		// Simulate TUI responding first by calling MarkInputResponded
+		server.MarkInputResponded(reqID)
+
+		// Now try to respond via web - should fail with 409
+		body := fmt.Sprintf(`{"request_id": "%s", "response": "web response"}`, reqID)
+		req, _ := http.NewRequest("POST", "http://"+addr+"/input", strings.NewReader(body))
+		req.Header.Set("Authorization", "Bearer "+token)
+		req.Header.Set("Content-Type", "application/json")
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatalf("failed to make request: %v", err)
+		}
+		defer resp.Body.Close()
+
+		if resp.StatusCode != http.StatusConflict {
+			t.Errorf("expected status %d (Conflict), got %d", http.StatusConflict, resp.StatusCode)
+		}
+	})
+
+	t.Run("IsInputResponded returns correct state", func(t *testing.T) {
+		// New request_id should not be responded
+		if server.IsInputResponded("new-request-456") {
+			t.Error("expected new request to not be responded")
+		}
+
+		// After marking, it should be responded
+		server.MarkInputResponded("new-request-456")
+		if !server.IsInputResponded("new-request-456") {
+			t.Error("expected marked request to be responded")
+		}
+	})
+}
+
+func TestInputBroadcastsUpdate(t *testing.T) {
+	server := createTestServer(t)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	go func() {
+		server.Start(ctx)
+	}()
+
+	time.Sleep(50 * time.Millisecond)
+	defer server.Stop()
+
+	addr := server.ListenAddr()
+	token := getAuthToken(t, addr)
+
+	// Submit input
+	body := `{"request_id": "broadcast-test-123", "response": "broadcast response"}`
+	req, _ := http.NewRequest("POST", "http://"+addr+"/input", strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("failed to make request: %v", err)
+	}
+	resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("expected status %d, got %d", http.StatusOK, resp.StatusCode)
+	}
+
+	// Verify the input request was broadcast as responded
+	_, _, inputRequests := server.Streams().GetCurrentState()
+
+	var found *InputRequest
+	for _, req := range inputRequests {
+		if req.ID == "broadcast-test-123" {
+			found = req
+			break
+		}
+	}
+
+	if found == nil {
+		t.Fatal("expected input request to be broadcast")
+	}
+
+	if !found.Responded {
+		t.Error("expected input request to be marked as responded")
+	}
+
+	if found.Response == nil || *found.Response != "broadcast response" {
+		t.Error("expected response to be set correctly")
+	}
+}
+
 // Tests for static asset serving
 
 func TestHandleStatic(t *testing.T) {
