@@ -162,7 +162,8 @@ func TestTerminalWriteLine(t *testing.T) {
 	term := NewTerminal(&buf)
 
 	term.WriteLine("hello")
-	assert.Equal(t, "hello\n", buf.String())
+	// In raw mode, \r\n is needed for proper line breaks
+	assert.Equal(t, "hello\r\n", buf.String())
 }
 
 func TestTerminalWritef(t *testing.T) {

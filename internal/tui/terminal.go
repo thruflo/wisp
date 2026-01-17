@@ -24,7 +24,7 @@ func NewTerminal(out io.Writer) *Terminal {
 	}
 }
 
-// EnterRaw puts the terminal into raw mode.
+// EnterRaw puts the terminal into raw mode and switches to the alternate screen buffer.
 // Returns an error if already in raw mode or if the operation fails.
 func (t *Terminal) EnterRaw() error {
 	if t.isRaw {
@@ -39,15 +39,22 @@ func (t *Terminal) EnterRaw() error {
 
 	t.oldState = oldState
 	t.isRaw = true
+
+	// Switch to alternate screen buffer to avoid polluting scrollback
+	fmt.Fprint(t.out, AltScreenEnter)
+
 	return nil
 }
 
-// ExitRaw restores the terminal to its original state.
+// ExitRaw restores the terminal to its original state and leaves the alternate screen buffer.
 // Safe to call even if not in raw mode.
 func (t *Terminal) ExitRaw() error {
 	if !t.isRaw || t.oldState == nil {
 		return nil
 	}
+
+	// Leave alternate screen buffer first (restores original screen content)
+	fmt.Fprint(t.out, AltScreenLeave)
 
 	fd := int(t.in.Fd())
 	if err := term.Restore(fd, t.oldState); err != nil {
@@ -82,11 +89,13 @@ func (t *Terminal) Read(p []byte) (n int, err error) {
 // ANSI escape sequences
 const (
 	// Screen control
-	ClearScreen = "\033[2J"   // Clear entire screen
-	ClearLine   = "\033[K"    // Clear from cursor to end of line
-	CursorHome  = "\033[H"    // Move cursor to home position (1,1)
-	CursorHide  = "\033[?25l" // Hide cursor
-	CursorShow  = "\033[?25h" // Show cursor
+	ClearScreen       = "\033[2J"      // Clear entire screen
+	ClearLine         = "\033[K"       // Clear from cursor to end of line
+	CursorHome        = "\033[H"       // Move cursor to home position (1,1)
+	CursorHide        = "\033[?25l"    // Hide cursor
+	CursorShow        = "\033[?25h"    // Show cursor
+	AltScreenEnter    = "\033[?1049h"  // Enter alternate screen buffer
+	AltScreenLeave    = "\033[?1049l"  // Leave alternate screen buffer
 
 	// Text attributes
 	Reset     = "\033[0m"
@@ -183,9 +192,10 @@ func (t *Terminal) Write(s string) {
 	fmt.Fprint(t.out, s)
 }
 
-// WriteLine writes a string followed by a newline to the terminal output.
+// WriteLine writes a string followed by a carriage return and newline.
+// In raw mode, \n alone only moves down; \r\n is needed to also return to column 1.
 func (t *Terminal) WriteLine(s string) {
-	fmt.Fprintln(t.out, s)
+	fmt.Fprint(t.out, s+"\r\n")
 }
 
 // Writef writes a formatted string to the terminal output.
