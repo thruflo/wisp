@@ -1,40 +1,19 @@
-# Wisp
+# Wisp - Ralphing on Sprites
 
-Minimal Ralph Wiggum orchestrator for RFC-driven development on Sprites.
-
-Point wisp at an RFC. Get a PR back.
+Automates spec-driven development using autonomous Claude Code loops
+in isolated [Sprites](https://sprites.dev).
 
 ## Requirements
 
-- Go 1.21+
-- Claude code (locally authenticated)
-- [Sprites CLI](https://sprites.dev) and `SPRITE_TOKEN`
-- `GITHUB_TOKEN` (for PR creation)
+- `claude` (locally authenticated)
+- `GITHUB_TOKEN` (for cloning and PR creation)
+- `SPRITE_TOKEN`
 
 ## Install
 
 ```bash
 go install github.com/thruflo/wisp@latest
 ```
-
-### Local development
-
-```bash
-go install ./cmd/wisp
-```
-
-Rebuilds to `$GOPATH/bin`. Run again after changes.
-
-### Running tests
-
-```bash
-make test                            # unit tests
-make test-integration                # integration tests (mocks)
-make test-real-sprites               # real Sprite tests
-make test-e2e                        # E2E CLI tests
-```
-
-See [Testing Guide](docs/testing.md) for credentials setup, debugging, and cleanup.
 
 ## Setup
 
@@ -50,9 +29,11 @@ GITHUB_TOKEN="..."
 SPRITE_TOKEN="..."
 ```
 
-Add project context to `AGENTS.md` in your repo root.
-
 ## Usage
+
+You provide an RFC. Wisp generates tasks and runs `claude` until
+done or blocked. Prompts for user input when needed. When done
+produces a PR.
 
 ### Start a session
 
@@ -122,6 +103,25 @@ limits:
 `.wisp/settings.json` — Claude deny rules and MCP servers.
 
 `.wisp/templates/default/` — prompt templates.
+
+## Local development
+
+```bash
+go install ./cmd/wisp
+```
+
+Rebuilds to `$GOPATH/bin`. Run again after changes.
+
+### Running tests
+
+```bash
+make test                            # unit tests
+make test-integration                # integration tests (mocks)
+make test-real-sprites               # real Sprite tests
+make test-e2e                        # E2E CLI tests
+```
+
+See [Testing Guide](docs/testing.md) for credentials setup, debugging, and cleanup.
 
 ## Docs
 

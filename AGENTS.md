@@ -2,6 +2,10 @@
 
 Go CLI tool for orchestrating Claude Code loops on Sprites.
 
+Wisp automates RFC implementation using autonomous Claude Code loops
+in isolated Sprites. Developer provides an RFC, wisp generates tasks,
+runs Claude until completion or blockage, produces a PR.
+
 ## Project structure
 
 ```
@@ -24,7 +28,6 @@ pkg/                # public API (if any)
 - Errors are values — handle explicitly, no panics for recoverable errors
 - Accept interfaces, return structs
 - Keep packages focused and minimal
-- when you build, build with `go install ./cmd/wisp` not `go build -o wisp ./cmd/wisp`
 
 ## CLI patterns
 
@@ -71,6 +74,13 @@ type Config struct {
 func Load(path string) (*Config, error) { ... }
 func (c *Config) Validate() error { ... }
 ```
+
+## Build
+
+When you build:
+
+- always use `go install ./cmd/wisp`
+- never use `go build -o wisp ./cmd/wisp`
 
 ## Testing
 
