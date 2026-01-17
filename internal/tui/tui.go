@@ -103,6 +103,21 @@ func NewTUI(out io.Writer) *TUI {
 	}
 }
 
+// NewNopTUI creates a no-op TUI that discards all output and never blocks.
+// This is used for headless mode where no terminal interaction is needed.
+func NewNopTUI() *TUI {
+	return &TUI{
+		terminal:    NewTerminal(io.Discard),
+		out:         io.Discard,
+		view:        ViewSummary,
+		tailView:    NewTailView(0), // No buffering needed
+		summaryView: &SummaryView{},
+		width:       80,
+		height:      24,
+		actionCh:    make(chan ActionEvent, 10),
+	}
+}
+
 // SetState updates the view state.
 func (t *TUI) SetState(state ViewState) {
 	t.mu.Lock()

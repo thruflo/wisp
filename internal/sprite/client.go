@@ -21,6 +21,10 @@ type Client interface {
 	// The caller is responsible for calling Wait() on the returned Cmd after processing output.
 	Execute(ctx context.Context, name string, dir string, env []string, args ...string) (*Cmd, error)
 
+	// ExecuteOutput runs a command on the Sprite and returns collected output (non-streaming).
+	// This uses the SDK's Run() method which avoids pipe handling issues.
+	ExecuteOutput(ctx context.Context, name string, dir string, env []string, args ...string) (stdout, stderr []byte, exitCode int, err error)
+
 	// WriteFile writes content to a file path on the Sprite.
 	WriteFile(ctx context.Context, name string, path string, content []byte) error
 
@@ -61,6 +65,16 @@ func (c *Cmd) ExitCode() int {
 		return exitErr.ExitCode()
 	}
 	return -1
+}
+
+// NewMockCmd creates a Cmd for testing with the given stdout/stderr readers.
+// The returned Cmd has a nil underlying cmd, so Wait() returns immediately.
+func NewMockCmd(stdout, stderr io.ReadCloser) *Cmd {
+	return &Cmd{
+		cmd:    nil,
+		Stdout: stdout,
+		Stderr: stderr,
+	}
 }
 
 // SDKClient implements Client using the sprites-go SDK.
@@ -136,6 +150,43 @@ func (c *SDKClient) Execute(ctx context.Context, name string, dir string, env []
 		Stdout: stdout,
 		Stderr: stderr,
 	}, nil
+}
+
+// ExecuteOutput runs a command on the Sprite and returns collected output (non-streaming).
+// This uses the SDK's Run() method which avoids pipe handling issues.
+func (c *SDKClient) ExecuteOutput(ctx context.Context, name string, dir string, env []string, args ...string) (stdout, stderr []byte, exitCode int, err error) {
+	if len(args) == 0 {
+		return nil, nil, -1, fmt.Errorf("no command specified")
+	}
+
+	sprite := c.client.Sprite(name)
+	cmd := sprite.CommandContext(ctx, args[0], args[1:]...)
+
+	if dir != "" {
+		cmd.Dir = dir
+	}
+	if len(env) > 0 {
+		cmd.Env = env
+	}
+
+	// Use bytes.Buffer to capture output
+	var stdoutBuf, stderrBuf strings.Builder
+	cmd.Stdout = &stdoutBuf
+	cmd.Stderr = &stderrBuf
+
+	// Run the command and wait for completion
+	runErr := cmd.Run()
+	stdout = []byte(stdoutBuf.String())
+	stderr = []byte(stderrBuf.String())
+
+	if runErr != nil {
+		if exitErr, ok := runErr.(*sprites.ExitError); ok {
+			return stdout, stderr, exitErr.ExitCode(), nil
+		}
+		return stdout, stderr, -1, runErr
+	}
+
+	return stdout, stderr, 0, nil
 }
 
 // WriteFile writes content to a file path on the Sprite.

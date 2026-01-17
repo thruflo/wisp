@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -24,7 +25,20 @@ var (
 	startBranch      string
 	startTemplate    string
 	startCheckpoint  string
+	startHeadless    bool
 )
+
+// HeadlessResult is the JSON output format for headless mode.
+// It contains the loop result and session information for testing/CI.
+type HeadlessResult struct {
+	Reason     string `json:"reason"`               // Exit reason (e.g., "completed", "max iterations")
+	Iterations int    `json:"iterations"`           // Number of iterations run
+	Branch     string `json:"branch"`               // Session branch name
+	SpriteName string `json:"sprite_name"`          // Sprite name
+	Error      string `json:"error,omitempty"`      // Error message if any
+	Status     string `json:"status,omitempty"`     // Final state status (DONE, CONTINUE, etc.)
+	Summary    string `json:"summary,omitempty"`    // Final state summary
+}
 
 var startCmd = &cobra.Command{
 	Use:   "start",
@@ -49,6 +63,7 @@ func init() {
 	startCmd.Flags().StringVarP(&startBranch, "branch", "b", "", "branch name (default: wisp/<slug-from-spec>)")
 	startCmd.Flags().StringVarP(&startTemplate, "template", "t", "default", "template name to use")
 	startCmd.Flags().StringVarP(&startCheckpoint, "checkpoint", "c", "", "checkpoint ID to restore from")
+	startCmd.Flags().BoolVar(&startHeadless, "headless", false, "run without TUI, print JSON result to stdout (for testing/CI)")
 
 	startCmd.MarkFlagRequired("repo")
 	startCmd.MarkFlagRequired("spec")
@@ -162,11 +177,16 @@ func runStart(cmd *cobra.Command, args []string) error {
 		fmt.Printf("Warning: failed to sync initial state: %v\n", err)
 	}
 
-	// Create TUI
-	t := tui.NewTUI(os.Stdout)
-
 	// Get template directory
 	templateDir := filepath.Join(cwd, ".wisp", "templates", startTemplate)
+
+	// Headless mode: run loop without TUI, output JSON result
+	if startHeadless {
+		return runHeadless(ctx, client, syncMgr, store, cfg, session, repoPath, templateDir)
+	}
+
+	// Create TUI
+	t := tui.NewTUI(os.Stdout)
 
 	// Create and run loop
 	l := loop.NewLoop(client, syncMgr, store, cfg, session, t, repoPath, templateDir)
@@ -210,6 +230,70 @@ func runStart(cmd *cobra.Command, args []string) error {
 		fmt.Printf("Error: %v\n", result.Error)
 	}
 	fmt.Printf("Iterations: %d\n", result.Iterations)
+
+	return nil
+}
+
+// runHeadless runs the iteration loop without a TUI and outputs JSON result to stdout.
+// This is used for testing and CI environments where interactive TUI is not available.
+func runHeadless(
+	ctx context.Context,
+	client sprite.Client,
+	syncMgr *state.SyncManager,
+	store *state.Store,
+	cfg *config.Config,
+	session *config.Session,
+	repoPath string,
+	templateDir string,
+) error {
+	// Create a no-op TUI for the loop (required by Loop but not used in headless mode)
+	t := tui.NewNopTUI()
+
+	// Create and run loop
+	l := loop.NewLoop(client, syncMgr, store, cfg, session, t, repoPath, templateDir)
+
+	// Run loop
+	result := l.Run(ctx)
+
+	// Update session status based on result
+	finalStatus := config.SessionStatusStopped
+	switch result.Reason {
+	case loop.ExitReasonDone:
+		finalStatus = config.SessionStatusCompleted
+	case loop.ExitReasonNeedsInput, loop.ExitReasonBlocked:
+		finalStatus = config.SessionStatusStopped
+	}
+
+	if err := store.UpdateSession(session.Branch, func(s *config.Session) {
+		s.Status = finalStatus
+	}); err != nil {
+		// Don't fail the whole command, just log
+		fmt.Fprintf(os.Stderr, "Warning: failed to update session status: %v\n", err)
+	}
+
+	// Build headless result
+	headlessResult := HeadlessResult{
+		Reason:     result.Reason.String(),
+		Iterations: result.Iterations,
+		Branch:     session.Branch,
+		SpriteName: session.SpriteName,
+	}
+
+	if result.Error != nil {
+		headlessResult.Error = result.Error.Error()
+	}
+
+	if result.State != nil {
+		headlessResult.Status = result.State.Status
+		headlessResult.Summary = result.State.Summary
+	}
+
+	// Output JSON to stdout
+	output, err := json.MarshalIndent(headlessResult, "", "  ")
+	if err != nil {
+		return fmt.Errorf("failed to marshal headless result: %w", err)
+	}
+	fmt.Println(string(output))
 
 	return nil
 }
