@@ -511,3 +511,60 @@ main {
   margin: 0;
   color: var(--color-success);
 }
+
+/* Disconnected page */
+.disconnected {
+  min-height: 100vh;
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  background: var(--color-bg);
+}
+
+.disconnected-content {
+  background: var(--color-surface);
+  padding: 3rem;
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
+  text-align: center;
+  max-width: 400px;
+  width: 100%;
+  margin: 1rem;
+}
+
+.disconnected-icon {
+  font-size: 4rem;
+  margin-bottom: 1rem;
+  color: var(--color-warning);
+}
+
+.disconnected h1 {
+  margin: 0 0 1rem;
+  color: var(--color-text);
+}
+
+.disconnected-message {
+  margin: 0 0 0.5rem;
+  color: var(--color-text);
+}
+
+.disconnected-hint {
+  margin: 0 0 1.5rem;
+  color: var(--color-text-muted);
+  font-size: 0.875rem;
+}
+
+.reconnect-btn {
+  padding: 0.75rem 2rem;
+  border: none;
+  border-radius: var(--radius);
+  background: var(--color-primary);
+  color: white;
+  font-size: 1rem;
+  cursor: pointer;
+  transition: background 0.15s;
+}
+
+.reconnect-btn:hover {
+  background: var(--color-primary-hover);
+}
