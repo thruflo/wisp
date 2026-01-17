@@ -27,6 +27,10 @@ type Client interface {
 	// This uses the SDK's Run() method which avoids pipe handling issues.
 	ExecuteOutput(ctx context.Context, name string, dir string, env []string, args ...string) (stdout, stderr []byte, exitCode int, err error)
 
+	// ExecuteOutputWithRetry runs a command with retries for transient failures (exit code 255).
+	// This is useful for commands that may fail due to sprite initialization race conditions.
+	ExecuteOutputWithRetry(ctx context.Context, name string, dir string, env []string, args ...string) (stdout, stderr []byte, exitCode int, err error)
+
 	// WriteFile writes content to a file path on the Sprite.
 	WriteFile(ctx context.Context, name string, path string, content []byte) error
 
@@ -170,14 +174,16 @@ func (c *SDKClient) waitForSpriteReady(ctx context.Context, name string) bool {
 			continue
 		}
 
-		// Try to run a simple command to verify the sprite is responsive
-		_, stderr, exitCode, err := c.ExecuteOutput(ctx, name, "", nil, "true")
+		// Try a filesystem operation to verify the sprite is fully ready.
+		// Using "mkdir -p /tmp" tests that the filesystem is mounted and writable,
+		// which is more robust than just "true" (which only tests SSH connectivity).
+		_, stderr, exitCode, err := c.ExecuteOutput(ctx, name, "", nil, "mkdir", "-p", "/tmp")
 		if err == nil && exitCode == 0 {
 			fmt.Printf("Sprite %q is ready (attempt %d)\n", name, attempt)
 			return true
 		}
 		if attempt == 1 || attempt%10 == 0 {
-			fmt.Printf("  [%d] Command failed: err=%v, exitCode=%d, stderr=%s\n", attempt, err, exitCode, string(stderr))
+			fmt.Printf("  [%d] Filesystem check failed: err=%v, exitCode=%d, stderr=%s\n", attempt, err, exitCode, string(stderr))
 		}
 
 		time.Sleep(pollInterval)
@@ -259,6 +265,51 @@ func (c *SDKClient) ExecuteOutput(ctx context.Context, name string, dir string, 
 	}
 
 	return stdout, stderr, 0, nil
+}
+
+// ExecuteOutputWithRetry runs a command with retries for transient failures.
+// Exit code 255 typically indicates SSH/connection errors that may be transient
+// during sprite initialization. This uses exponential backoff with max 5 retries.
+func (c *SDKClient) ExecuteOutputWithRetry(ctx context.Context, name string, dir string, env []string, args ...string) (stdout, stderr []byte, exitCode int, err error) {
+	const (
+		maxRetries   = 5
+		initialDelay = 100 * time.Millisecond
+	)
+
+	delay := initialDelay
+	for attempt := 0; attempt <= maxRetries; attempt++ {
+		stdout, stderr, exitCode, err = c.ExecuteOutput(ctx, name, dir, env, args...)
+
+		// Success or non-retryable error
+		if err == nil && exitCode != 255 {
+			return stdout, stderr, exitCode, err
+		}
+
+		// Don't retry on actual errors (as opposed to non-zero exit codes)
+		if err != nil {
+			return stdout, stderr, exitCode, err
+		}
+
+		// Exit code 255 - transient failure, retry
+		if attempt < maxRetries {
+			// Check context before sleeping
+			select {
+			case <-ctx.Done():
+				return stdout, stderr, exitCode, ctx.Err()
+			default:
+			}
+
+			cmdStr := ""
+			if len(args) > 0 {
+				cmdStr = args[0]
+			}
+			fmt.Printf("Command %q returned exit code 255, retrying (%d/%d)...\n", cmdStr, attempt+1, maxRetries)
+			time.Sleep(delay)
+			delay *= 2 // Exponential backoff
+		}
+	}
+
+	return stdout, stderr, exitCode, err
 }
 
 // WriteFile writes content to a file path on the Sprite.

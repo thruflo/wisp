@@ -102,6 +102,10 @@ func (m *MockClient) ExecuteOutput(ctx context.Context, name string, dir string,
 	return m.ExecuteStdout, m.ExecuteStderr, 0, nil
 }
 
+func (m *MockClient) ExecuteOutputWithRetry(ctx context.Context, name string, dir string, env []string, args ...string) (stdout, stderr []byte, exitCode int, err error) {
+	return m.ExecuteOutput(ctx, name, dir, env, args...)
+}
+
 func (m *MockClient) WriteFile(ctx context.Context, name string, path string, content []byte) error {
 	m.WriteCalls = append(m.WriteCalls, WriteCall{Name: name, Path: path, Content: content})
 	return m.WriteErr

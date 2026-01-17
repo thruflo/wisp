@@ -475,9 +475,9 @@ func CloneRepo(ctx context.Context, client sprite.Client, spriteName, repo, dest
 	// Remove destination if it exists (handles stale state from previous runs)
 	_, _, _, _ = client.ExecuteOutput(ctx, spriteName, "", nil, "rm", "-rf", destPath)
 
-	// Ensure parent directory exists
+	// Ensure parent directory exists (use retry to handle transient sprite failures)
 	parentDir := filepath.Dir(destPath)
-	_, _, exitCode, err := client.ExecuteOutput(ctx, spriteName, "", nil, "mkdir", "-p", parentDir)
+	_, _, exitCode, err := client.ExecuteOutputWithRetry(ctx, spriteName, "", nil, "mkdir", "-p", parentDir)
 	if err != nil {
 		return fmt.Errorf("failed to create parent directory: %w", err)
 	}

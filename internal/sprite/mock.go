@@ -132,6 +132,11 @@ func (m *MockSpriteClient) ExecuteOutput(ctx context.Context, name string, dir s
 	return nil, nil, 0, nil
 }
 
+// ExecuteOutputWithRetry delegates to ExecuteOutput (mocks don't need retry logic).
+func (m *MockSpriteClient) ExecuteOutputWithRetry(ctx context.Context, name string, dir string, env []string, args ...string) (stdout, stderr []byte, exitCode int, err error) {
+	return m.ExecuteOutput(ctx, name, dir, env, args...)
+}
+
 // WriteFile records the call and stores content in the mock filesystem.
 func (m *MockSpriteClient) WriteFile(ctx context.Context, name string, path string, content []byte) error {
 	m.mu.Lock()

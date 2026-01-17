@@ -420,6 +420,10 @@ func (m *mockClientForDefaults) ExecuteOutput(ctx context.Context, name string, 
 	return nil, nil, 0, nil
 }
 
+func (m *mockClientForDefaults) ExecuteOutputWithRetry(ctx context.Context, name string, dir string, env []string, args ...string) (stdout, stderr []byte, exitCode int, err error) {
+	return m.ExecuteOutput(ctx, name, dir, env, args...)
+}
+
 func (m *mockClientForDefaults) WriteFile(ctx context.Context, name string, path string, content []byte) error {
 	return nil
 }

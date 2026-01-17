@@ -208,6 +208,10 @@ func (m *headlessMockClient) ExecuteOutput(ctx context.Context, name string, dir
 	return nil, nil, 0, nil
 }
 
+func (m *headlessMockClient) ExecuteOutputWithRetry(ctx context.Context, name string, dir string, env []string, args ...string) (stdout, stderr []byte, exitCode int, err error) {
+	return m.ExecuteOutput(ctx, name, dir, env, args...)
+}
+
 func (m *headlessMockClient) WriteFile(ctx context.Context, name string, path string, content []byte) error {
 	return nil
 }
