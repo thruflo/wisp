@@ -16,6 +16,39 @@ const (
 	BoxVertical    = "│"
 )
 
+// VisualWidth returns the visual width of a string, excluding ANSI escape codes.
+func VisualWidth(s string) int {
+	return utf8.RuneCountInString(StripAnsi(s))
+}
+
+// StripAnsi removes ANSI escape codes from a string.
+func StripAnsi(s string) string {
+	var result strings.Builder
+	i := 0
+	for i < len(s) {
+		if i+1 < len(s) && s[i] == '\033' && s[i+1] == '[' {
+			// Skip the escape sequence until we hit a terminator letter
+			j := i + 2
+			for j < len(s) && !isAnsiTerminator(s[j]) {
+				j++
+			}
+			if j < len(s) {
+				j++ // Skip the terminator letter
+			}
+			i = j
+		} else {
+			result.WriteByte(s[i])
+			i++
+		}
+	}
+	return result.String()
+}
+
+// isAnsiTerminator returns true if the byte is an ANSI escape sequence terminator.
+func isAnsiTerminator(b byte) bool {
+	return (b >= 'A' && b <= 'Z') || (b >= 'a' && b <= 'z')
+}
+
 // Box draws a box with the given dimensions.
 // Returns a slice of strings, one per line.
 func Box(width, height int) []string {
@@ -66,29 +99,76 @@ func BoxWithContent(width int, content []string) []string {
 	return lines
 }
 
-// PadOrTruncate pads or truncates a string to exactly width characters.
-// Uses visual width (rune count) for proper Unicode handling.
+// PadOrTruncate pads or truncates a string to exactly width visual characters.
+// Uses VisualWidth to properly handle ANSI escape codes.
 func PadOrTruncate(s string, width int) string {
 	if width <= 0 {
 		return ""
 	}
 
-	runeLen := utf8.RuneCountInString(s)
+	visualLen := VisualWidth(s)
 
-	if runeLen == width {
+	if visualLen == width {
 		return s
 	}
 
-	if runeLen < width {
-		return s + strings.Repeat(" ", width-runeLen)
+	if visualLen < width {
+		return s + strings.Repeat(" ", width-visualLen)
 	}
 
-	// Truncate, preserving rune boundaries
-	runes := []rune(s)
-	if width >= 3 {
-		return string(runes[:width-3]) + "..."
+	// Truncate based on visual width, preserving ANSI codes
+	return truncateVisual(s, width)
+}
+
+// truncateVisual truncates a string to a visual width, handling ANSI codes.
+func truncateVisual(s string, width int) string {
+	if width <= 0 {
+		return ""
 	}
-	return string(runes[:width])
+
+	var result strings.Builder
+	visualPos := 0
+	i := 0
+	hasAnsi := false
+
+	// Reserve space for ellipsis if needed
+	targetWidth := width
+	if width >= 3 {
+		targetWidth = width - 3
+	}
+
+	for i < len(s) && visualPos < targetWidth {
+		if i+1 < len(s) && s[i] == '\033' && s[i+1] == '[' {
+			// ANSI escape sequence - copy it but don't count visual width
+			hasAnsi = true
+			start := i
+			j := i + 2
+			for j < len(s) && !isAnsiTerminator(s[j]) {
+				j++
+			}
+			if j < len(s) {
+				j++ // Include the terminator
+			}
+			result.WriteString(s[start:j])
+			i = j
+		} else {
+			// Regular character - count it and copy
+			_, size := utf8.DecodeRuneInString(s[i:])
+			result.WriteString(s[i : i+size])
+			visualPos++
+			i += size
+		}
+	}
+
+	// Add ellipsis; include reset code only if string had ANSI codes
+	if width >= 3 && VisualWidth(s) > width {
+		if hasAnsi {
+			result.WriteString(Reset)
+		}
+		result.WriteString("...")
+	}
+
+	return result.String()
 }
 
 // Truncate truncates a string to max width, adding ellipsis if needed.

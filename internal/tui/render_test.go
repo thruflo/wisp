@@ -388,3 +388,91 @@ func TestFormatStatus(t *testing.T) {
 		})
 	}
 }
+
+func TestVisualWidth(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name  string
+		input string
+		want  int
+	}{
+		{"plain text", "hello", 5},
+		{"with bold", Bold + "hello" + Reset, 5},
+		{"with color", FgGreen + "hello" + Reset, 5},
+		{"with color and bold", FgGreen + Bold + "RUNNING" + Reset, 7},
+		{"unicode", "日本語", 3},
+		{"empty", "", 0},
+		{"only ansi", FgGreen + Reset, 0},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			assert.Equal(t, tt.want, VisualWidth(tt.input))
+		})
+	}
+}
+
+func TestStripAnsi(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name  string
+		input string
+		want  string
+	}{
+		{"plain text", "hello", "hello"},
+		{"with bold", Bold + "hello" + Reset, "hello"},
+		{"with color", FgGreen + "hello" + Reset, "hello"},
+		{"multiple codes", FgGreen + Bold + "test" + Reset, "test"},
+		{"empty", "", ""},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			assert.Equal(t, tt.want, StripAnsi(tt.input))
+		})
+	}
+}
+
+func TestPadOrTruncateWithAnsi(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name  string
+		input string
+		width int
+		want  string
+	}{
+		{
+			name:  "ansi needs padding",
+			input: FgGreen + "hi" + Reset,
+			width: 5,
+			want:  FgGreen + "hi" + Reset + "   ",
+		},
+		{
+			name:  "ansi exact width",
+			input: FgGreen + "hello" + Reset,
+			width: 5,
+			want:  FgGreen + "hello" + Reset,
+		},
+		{
+			name:  "ansi needs truncation",
+			input: FgGreen + "hello world" + Reset,
+			width: 8,
+			want:  FgGreen + "hello" + Reset + "...",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got := PadOrTruncate(tt.input, tt.width)
+			assert.Equal(t, tt.want, got)
+			// Also verify the visual width is correct
+			assert.Equal(t, tt.width, VisualWidth(got))
+		})
+	}
+}
