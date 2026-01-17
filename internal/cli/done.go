@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"sort"
 	"strings"
 
 	"github.com/spf13/cobra"
@@ -361,6 +362,7 @@ func buildPRTitle(tasks []state.Task) string {
 			parts = append(parts, fmt.Sprintf("%d %s tasks", count, cat))
 		}
 	}
+	sort.Strings(parts)
 
 	if len(parts) > 0 {
 		return "Implement " + strings.Join(parts, ", ")
