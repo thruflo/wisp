@@ -27,26 +27,14 @@ Rebuilds to `$GOPATH/bin`. Run again after changes.
 
 ### Running tests
 
-**Unit tests** (no tags required):
-
 ```bash
-go test ./...
+go test ./...                                           # unit tests
+make test-integration                                   # integration tests (mocks)
+make test-real-sprites                                  # real Sprite tests
+make test-e2e                                           # E2E CLI tests
 ```
 
-**Component integration tests** (uses mocks, no credentials needed):
-
-```bash
-go test -tags=integration ./internal/integration/...
-```
-
-**Real Sprite integration tests** (requires valid `SPRITE_TOKEN`):
-
-```bash
-# Ensure .wisp/.sprite.env has valid SPRITE_TOKEN
-go test -v -tags=integration,real_sprites ./internal/integration/... -timeout 2m
-```
-
-The real Sprite tests create actual Sprites, run file operations, and clean up automatically. They take ~15 seconds to run.
+See [Testing Guide](docs/testing.md) for credentials setup, debugging, and cleanup.
 
 ## Setup
 
@@ -139,3 +127,4 @@ limits:
 
 - [RFC](docs/rfc.md) — implementation specification
 - [PRD](docs/prd.md) — product requirements
+- [Testing](docs/testing.md) — test tiers, setup, and debugging
