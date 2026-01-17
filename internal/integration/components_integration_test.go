@@ -12,9 +12,8 @@
 // To run tests against real Sprite infrastructure:
 //
 // 1. Set environment variables:
-//   - SPRITE_TOKEN: Your Sprites API token
-//   - ANTHROPIC_API_KEY: Your Anthropic API key
 //   - GITHUB_TOKEN: Your GitHub token (for repo cloning)
+//   - SPRITE_TOKEN: Your Sprites API token
 //
 // 2. Run with the real_sprites build tag:
 //
@@ -285,7 +284,7 @@ func setupTestEnv(t *testing.T) (string, *state.Store) {
 	require.NoError(t, os.WriteFile(filepath.Join(wispDir, "settings.json"), settingsData, 0644))
 
 	// Write .sprite.env
-	envContent := "ANTHROPIC_API_KEY=test-key\nGITHUB_TOKEN=test-token\n"
+	envContent := "GITHUB_TOKEN=test-token\nSPRITE_TOKEN=test-key\n"
 	require.NoError(t, os.WriteFile(filepath.Join(wispDir, ".sprite.env"), []byte(envContent), 0644))
 
 	// Write template files

@@ -111,6 +111,7 @@ func writeSettingsJSON(wispDir string) error {
 				"Read(~/.ssh/**)", "Edit(~/.ssh/**)",
 				"Read(~/.aws/**)", "Edit(~/.aws/**)",
 				"Read(~/.config/gh/**)", "Edit(~/.config/gh/**)",
+				"Read(~/.config/claude/**)", "Edit(~/.config/claude/**)",
 				"Read(**/.env)", "Edit(**/.env)",
 				"Read(**/.env.*)", "Edit(**/.env.*)",
 			},
@@ -134,9 +135,12 @@ func writeSettingsJSON(wispDir string) error {
 func writeSpriteEnv(wispDir string) error {
 	content := `# Sprite environment variables (gitignored)
 # These are injected into the Sprite environment on setup
+#
+# Note: Claude authentication uses your local ~/.config/claude/ credentials
+# (from 'claude login') which are automatically copied to the Sprite.
 
-ANTHROPIC_API_KEY=
-GITHUB_TOKEN=
+GITHUB_TOKEN="..."
+SPRITE_TOKEN="..."
 `
 	return os.WriteFile(filepath.Join(wispDir, ".sprite.env"), []byte(content), 0644)
 }

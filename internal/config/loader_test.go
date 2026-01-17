@@ -348,8 +348,8 @@ func TestLoadEnvFile_Valid(t *testing.T) {
 	require.NoError(t, os.MkdirAll(wispDir, 0o755))
 
 	envContent := `# API Keys
-ANTHROPIC_API_KEY=sk-ant-test123
 GITHUB_TOKEN=ghp_test456
+SPRITE_TOKEN=sk-ant-test123
 
 # Empty line above is ok
 
@@ -361,8 +361,8 @@ ANOTHER_VAR=no-spaces
 	env, err := LoadEnvFile(tmpDir)
 	require.NoError(t, err)
 
-	assert.Equal(t, "sk-ant-test123", env["ANTHROPIC_API_KEY"])
 	assert.Equal(t, "ghp_test456", env["GITHUB_TOKEN"])
+	assert.Equal(t, "sk-ant-test123", env["SPRITE_TOKEN"])
 	assert.Equal(t, "value with spaces", env["SOME_VAR"])
 	assert.Equal(t, "no-spaces", env["ANOTHER_VAR"])
 	assert.Len(t, env, 4)

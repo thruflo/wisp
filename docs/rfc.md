@@ -206,8 +206,8 @@ Per-iteration prompt. Instructs agent to:
 ### `.wisp/.sprite.env`
 
 ```bash
-ANTHROPIC_API_KEY=sk-ant-...
 GITHUB_TOKEN=ghp_...
+SPRITE_TOKEN=
 ```
 
 Gitignored. Copied to Sprite env on setup.

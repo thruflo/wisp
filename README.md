@@ -7,8 +7,8 @@ Point wisp at an RFC. Get a PR back.
 ## Requirements
 
 - Go 1.21+
+- Claude code (locally authenticated)
 - [Sprites CLI](https://sprites.dev) and `SPRITE_TOKEN`
-- `ANTHROPIC_API_KEY`
 - `GITHUB_TOKEN` (for PR creation)
 
 ## Install
@@ -25,6 +25,29 @@ go install ./cmd/wisp
 
 Rebuilds to `$GOPATH/bin`. Run again after changes.
 
+### Running tests
+
+**Unit tests** (no tags required):
+
+```bash
+go test ./...
+```
+
+**Component integration tests** (uses mocks, no credentials needed):
+
+```bash
+go test -tags=integration ./internal/integration/...
+```
+
+**Real Sprite integration tests** (requires valid `SPRITE_TOKEN`):
+
+```bash
+# Ensure .wisp/.sprite.env has valid SPRITE_TOKEN
+go test -v -tags=integration,real_sprites ./internal/integration/... -timeout 2m
+```
+
+The real Sprite tests create actual Sprites, run file operations, and clean up automatically. They take ~15 seconds to run.
+
 ## Setup
 
 ```bash
@@ -35,8 +58,8 @@ wisp init
 Edit `.wisp/.sprite.env` with your credentials:
 
 ```bash
-ANTHROPIC_API_KEY=sk-ant-...
-GITHUB_TOKEN=ghp_...
+GITHUB_TOKEN="..."
+SPRITE_TOKEN="..."
 ```
 
 Add project context to `AGENTS.md` in your repo root.

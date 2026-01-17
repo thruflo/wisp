@@ -323,6 +323,12 @@ func setupSprite(
 		return "", fmt.Errorf("failed to inject env vars: %w", err)
 	}
 
+	// Copy Claude credentials for Claude Max authentication
+	fmt.Printf("Copying Claude credentials...\n")
+	if err := copyClaudeCredentials(ctx, client, session.SpriteName); err != nil {
+		return "", fmt.Errorf("failed to copy Claude credentials: %w", err)
+	}
+
 	return repoPath, nil
 }
 
@@ -386,6 +392,58 @@ func injectEnvVars(ctx context.Context, client sprite.Client, spriteName string,
 	content := strings.Join(exports, "\n") + "\n"
 	if err := client.WriteFile(ctx, spriteName, "/home/sprite/.bashrc", []byte(content)); err != nil {
 		return fmt.Errorf("failed to write .bashrc: %w", err)
+	}
+
+	return nil
+}
+
+// copyClaudeCredentials copies local Claude credentials to the Sprite for Claude Max auth.
+// This reads from ~/.config/claude/ locally and writes to /home/sprite/.config/claude/ on the Sprite.
+func copyClaudeCredentials(ctx context.Context, client sprite.Client, spriteName string) error {
+	homeDir, err := os.UserHomeDir()
+	if err != nil {
+		return fmt.Errorf("failed to get home directory: %w", err)
+	}
+
+	claudeConfigDir := filepath.Join(homeDir, ".config", "claude")
+
+	// Check if local credentials exist
+	if _, err := os.Stat(claudeConfigDir); os.IsNotExist(err) {
+		return fmt.Errorf("Claude credentials not found at %s; run 'claude login' first", claudeConfigDir)
+	}
+
+	// Create .config/claude directory on Sprite
+	mkdirCmd := "mkdir -p /home/sprite/.config/claude"
+	cmd, err := client.Execute(ctx, spriteName, "", nil, "bash", "-c", mkdirCmd)
+	if err != nil {
+		return fmt.Errorf("failed to create config directory: %w", err)
+	}
+	if err := cmd.Wait(); err != nil {
+		return fmt.Errorf("failed to create config directory: %w", err)
+	}
+
+	// Copy all files from local claude config to Sprite
+	entries, err := os.ReadDir(claudeConfigDir)
+	if err != nil {
+		return fmt.Errorf("failed to read claude config directory: %w", err)
+	}
+
+	for _, entry := range entries {
+		if entry.IsDir() {
+			continue // Skip subdirectories for now
+		}
+
+		localPath := filepath.Join(claudeConfigDir, entry.Name())
+		remotePath := filepath.Join("/home/sprite/.config/claude", entry.Name())
+
+		content, err := os.ReadFile(localPath)
+		if err != nil {
+			return fmt.Errorf("failed to read %s: %w", localPath, err)
+		}
+
+		if err := client.WriteFile(ctx, spriteName, remotePath, content); err != nil {
+			return fmt.Errorf("failed to write %s to sprite: %w", remotePath, err)
+		}
 	}
 
 	return nil

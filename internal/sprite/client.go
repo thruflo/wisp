@@ -141,28 +141,10 @@ func (c *SDKClient) Execute(ctx context.Context, name string, dir string, env []
 // WriteFile writes content to a file path on the Sprite.
 func (c *SDKClient) WriteFile(ctx context.Context, name string, path string, content []byte) error {
 	sprite := c.client.Sprite(name)
+	fs := sprite.Filesystem()
 
-	// Use bash -c 'cat > path' pattern from SDK docs
-	cmd := sprite.CommandContext(ctx, "bash", "-c", fmt.Sprintf("cat > %s", path))
-	stdin, err := cmd.StdinPipe()
-	if err != nil {
-		return fmt.Errorf("failed to create stdin pipe: %w", err)
-	}
-
-	if err := cmd.Start(); err != nil {
-		return fmt.Errorf("failed to start write command: %w", err)
-	}
-
-	if _, err := stdin.Write(content); err != nil {
-		return fmt.Errorf("failed to write content: %w", err)
-	}
-
-	if err := stdin.Close(); err != nil {
-		return fmt.Errorf("failed to close stdin: %w", err)
-	}
-
-	if err := cmd.Wait(); err != nil {
-		return fmt.Errorf("failed to complete write: %w", err)
+	if err := fs.WriteFileContext(ctx, path, content, 0644); err != nil {
+		return fmt.Errorf("failed to write file %s: %w", path, err)
 	}
 
 	return nil
@@ -171,14 +153,16 @@ func (c *SDKClient) WriteFile(ctx context.Context, name string, path string, con
 // ReadFile reads content from a file path on the Sprite.
 func (c *SDKClient) ReadFile(ctx context.Context, name string, path string) ([]byte, error) {
 	sprite := c.client.Sprite(name)
+	fs := sprite.Filesystem()
 
-	cmd := sprite.CommandContext(ctx, "cat", path)
-	output, err := cmd.Output()
+	// Note: SDK's FS interface doesn't expose ReadFileContext, so we use ReadFile.
+	// The context deadline is still respected via the underlying HTTP client.
+	data, err := fs.ReadFile(path)
 	if err != nil {
 		return nil, fmt.Errorf("failed to read file %s: %w", path, err)
 	}
 
-	return output, nil
+	return data, nil
 }
 
 // Delete deletes the Sprite.
@@ -193,8 +177,11 @@ func (c *SDKClient) Delete(ctx context.Context, name string) error {
 func (c *SDKClient) Exists(ctx context.Context, name string) (bool, error) {
 	_, err := c.client.GetSprite(ctx, name)
 	if err != nil {
-		// Check if it's a "not found" error
-		if strings.Contains(err.Error(), "not found") || strings.Contains(err.Error(), "404") {
+		// Check if it's a "not found" error (SDK returns various error formats)
+		errStr := strings.ToLower(err.Error())
+		if strings.Contains(errStr, "not found") ||
+			strings.Contains(errStr, "404") ||
+			strings.Contains(errStr, "failed to retrieve sprite") {
 			return false, nil
 		}
 		return false, fmt.Errorf("failed to check sprite existence: %w", err)

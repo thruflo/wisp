@@ -192,6 +192,14 @@ func LoadEnvFile(basePath string) (map[string]string, error) {
 		key := strings.TrimSpace(line[:idx])
 		value := strings.TrimSpace(line[idx+1:])
 
+		// Strip surrounding quotes (single or double)
+		if len(value) >= 2 {
+			if (value[0] == '"' && value[len(value)-1] == '"') ||
+				(value[0] == '\'' && value[len(value)-1] == '\'') {
+				value = value[1 : len(value)-1]
+			}
+		}
+
 		if key == "" {
 			return nil, fmt.Errorf("invalid env file line %d: empty key", lineNum)
 		}

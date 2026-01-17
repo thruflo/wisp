@@ -83,8 +83,8 @@ func TestInitCommand(t *testing.T) {
 
 		content, err := os.ReadFile(envPath)
 		require.NoError(t, err)
-		assert.Contains(t, string(content), "ANTHROPIC_API_KEY=")
 		assert.Contains(t, string(content), "GITHUB_TOKEN=")
+		assert.Contains(t, string(content), "SPRITE_TOKEN=")
 	})
 
 	// Verify .gitignore
