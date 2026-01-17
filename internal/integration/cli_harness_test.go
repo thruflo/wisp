@@ -9,6 +9,9 @@ package integration
 import (
 	"bytes"
 	"context"
+	"encoding/json"
+	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -16,6 +19,7 @@ import (
 	"time"
 
 	"github.com/stretchr/testify/require"
+	"github.com/thruflo/wisp/internal/config"
 )
 
 // CLIHarness manages a wisp CLI binary for E2E testing.
@@ -71,6 +75,9 @@ func NewCLIHarness(t *testing.T) *CLIHarness {
 	// Create workspace directory with .wisp structure
 	workDir := filepath.Join(tmpDir, "workspace")
 	require.NoError(t, os.MkdirAll(workDir, 0755))
+
+	// Setup the test workspace with .wisp configuration
+	setupTestWorkspace(t, workDir, projectRoot)
 
 	h := &CLIHarness{
 		BinaryPath: binaryPath,
@@ -239,4 +246,189 @@ func (h *CLIHarness) RequireFailure(result *CLIResult, msgAndArgs ...interface{}
 		h.t.Fatalf("%s: command succeeded unexpectedly\nstdout: %s\nstderr: %s",
 			msg, result.Stdout, result.Stderr)
 	}
+}
+
+// setupTestWorkspace creates a .wisp directory structure for CLI E2E testing.
+// It copies configuration and templates from the project root, with test-appropriate
+// settings. Credentials are read from environment variables.
+func setupTestWorkspace(t *testing.T, workDir, projectRoot string) {
+	t.Helper()
+
+	wispDir := filepath.Join(workDir, ".wisp")
+
+	// Create directory structure
+	dirs := []string{
+		wispDir,
+		filepath.Join(wispDir, "sessions"),
+		filepath.Join(wispDir, "templates", "default"),
+	}
+	for _, dir := range dirs {
+		require.NoError(t, os.MkdirAll(dir, 0755))
+	}
+
+	// Write config.yaml with test-appropriate settings (lower limits)
+	testConfig := `# Wisp test configuration
+# Lower limits for faster E2E tests
+
+limits:
+  # Maximum number of Claude iterations before stopping
+  max_iterations: 5
+
+  # Maximum budget in USD per session
+  max_budget_usd: 2.00
+
+  # Maximum wall-clock time in hours
+  max_duration_hours: 0.5
+
+  # Number of iterations without task progress before marking BLOCKED
+  no_progress_threshold: 2
+`
+	require.NoError(t, os.WriteFile(
+		filepath.Join(wispDir, "config.yaml"),
+		[]byte(testConfig),
+		0644,
+	))
+
+	// Write settings.json with test-appropriate permissions
+	settings := config.Settings{
+		Permissions: config.Permissions{
+			Deny: []string{
+				"Read(~/.ssh/**)",
+				"Edit(~/.ssh/**)",
+				"Read(~/.aws/**)",
+				"Edit(~/.aws/**)",
+			},
+		},
+		MCPServers: map[string]config.MCPServer{},
+	}
+	settingsData, err := json.MarshalIndent(settings, "", "  ")
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(
+		filepath.Join(wispDir, "settings.json"),
+		settingsData,
+		0644,
+	))
+
+	// Copy templates from project root
+	srcTemplateDir := filepath.Join(projectRoot, ".wisp", "templates", "default")
+	dstTemplateDir := filepath.Join(wispDir, "templates", "default")
+	copyTemplates(t, srcTemplateDir, dstTemplateDir)
+
+	// Write .sprite.env with credentials from environment
+	writeTestSpriteEnv(t, wispDir)
+}
+
+// copyTemplates copies all template files from src to dst directory.
+// Falls back to minimal templates if the source doesn't exist.
+func copyTemplates(t *testing.T, src, dst string) {
+	t.Helper()
+
+	// Check if source templates exist
+	if _, err := os.Stat(src); os.IsNotExist(err) {
+		// Write minimal fallback templates
+		t.Log("source templates not found, using minimal templates")
+		writeMinimalTemplates(t, dst)
+		return
+	}
+
+	// Read source directory
+	entries, err := os.ReadDir(src)
+	require.NoError(t, err, "failed to read template directory")
+
+	for _, entry := range entries {
+		if entry.IsDir() {
+			continue // Skip subdirectories
+		}
+
+		srcPath := filepath.Join(src, entry.Name())
+		dstPath := filepath.Join(dst, entry.Name())
+
+		if err := copyFile(srcPath, dstPath); err != nil {
+			// Log and continue with other templates
+			t.Logf("failed to copy template %s: %v", entry.Name(), err)
+			continue
+		}
+	}
+}
+
+// copyFile copies a single file from src to dst.
+func copyFile(src, dst string) error {
+	srcFile, err := os.Open(src)
+	if err != nil {
+		return fmt.Errorf("open source: %w", err)
+	}
+	defer srcFile.Close()
+
+	dstFile, err := os.Create(dst)
+	if err != nil {
+		return fmt.Errorf("create dest: %w", err)
+	}
+	defer dstFile.Close()
+
+	if _, err := io.Copy(dstFile, srcFile); err != nil {
+		return fmt.Errorf("copy content: %w", err)
+	}
+
+	return nil
+}
+
+// writeMinimalTemplates writes minimal template files for testing.
+// Used as a fallback when project templates aren't available.
+func writeMinimalTemplates(t *testing.T, templateDir string) {
+	t.Helper()
+
+	templates := map[string]string{
+		"context.md":      "# Context\nYou are an autonomous coding agent.\n",
+		"create-tasks.md": "# Create Tasks\nRead the RFC and generate tasks.\n",
+		"update-tasks.md": "# Update Tasks\nUpdate the task list based on progress.\n",
+		"review-tasks.md": "# Review Tasks\nReview completed tasks.\n",
+		"iterate.md":      "# Iterate\nComplete the next incomplete task.\n",
+	}
+
+	for name, content := range templates {
+		path := filepath.Join(templateDir, name)
+		require.NoError(t, os.WriteFile(path, []byte(content), 0644))
+	}
+}
+
+// writeTestSpriteEnv writes .sprite.env with credentials from environment variables.
+// If credentials aren't available, writes placeholder values.
+func writeTestSpriteEnv(t *testing.T, wispDir string) {
+	t.Helper()
+
+	spriteToken := os.Getenv("SPRITE_TOKEN")
+	githubToken := os.Getenv("GITHUB_TOKEN")
+
+	// Also try loading from project's .sprite.env if env vars aren't set
+	if spriteToken == "" || githubToken == "" {
+		projectRoot := findProjectRootForHarness(t)
+		if projectRoot != "" {
+			envVars, err := config.LoadEnvFile(projectRoot)
+			if err == nil {
+				if spriteToken == "" {
+					spriteToken = envVars["SPRITE_TOKEN"]
+				}
+				if githubToken == "" {
+					githubToken = envVars["GITHUB_TOKEN"]
+				}
+			}
+		}
+	}
+
+	// Use placeholder if still not available (tests requiring real credentials will skip)
+	if spriteToken == "" {
+		spriteToken = "test-sprite-token"
+		t.Log("SPRITE_TOKEN not found, using placeholder")
+	}
+	if githubToken == "" {
+		githubToken = "test-github-token"
+		t.Log("GITHUB_TOKEN not found, using placeholder")
+	}
+
+	envContent := fmt.Sprintf("GITHUB_TOKEN=%q\nSPRITE_TOKEN=%q\n", githubToken, spriteToken)
+	require.NoError(t, os.WriteFile(
+		filepath.Join(wispDir, ".sprite.env"),
+		[]byte(envContent),
+		0644,
+	))
 }

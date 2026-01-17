@@ -194,3 +194,62 @@ func TestFindProjectRootForHarness(t *testing.T) {
 	assert.True(t, wispErr == nil || goModErr == nil,
 		"project root should contain .wisp or go.mod")
 }
+
+// TestSetupTestWorkspace_CreatesStructure verifies workspace setup creates all expected files.
+func TestSetupTestWorkspace_CreatesStructure(t *testing.T) {
+	h := NewCLIHarness(t)
+
+	wispDir := filepath.Join(h.WorkDir, ".wisp")
+
+	// Verify directory structure
+	expectedDirs := []string{
+		wispDir,
+		filepath.Join(wispDir, "sessions"),
+		filepath.Join(wispDir, "templates", "default"),
+	}
+	for _, dir := range expectedDirs {
+		info, err := os.Stat(dir)
+		require.NoError(t, err, "directory %s should exist", dir)
+		assert.True(t, info.IsDir(), "%s should be a directory", dir)
+	}
+
+	// Verify config.yaml exists with test-appropriate settings
+	configPath := filepath.Join(wispDir, "config.yaml")
+	configContent, err := os.ReadFile(configPath)
+	require.NoError(t, err, "config.yaml should exist")
+	assert.Contains(t, string(configContent), "max_iterations: 5",
+		"config should have test-appropriate iteration limit")
+	assert.Contains(t, string(configContent), "max_budget_usd: 2",
+		"config should have test-appropriate budget limit")
+
+	// Verify settings.json exists
+	settingsPath := filepath.Join(wispDir, "settings.json")
+	settingsContent, err := os.ReadFile(settingsPath)
+	require.NoError(t, err, "settings.json should exist")
+	assert.Contains(t, string(settingsContent), "permissions",
+		"settings should contain permissions")
+
+	// Verify .sprite.env exists
+	envPath := filepath.Join(wispDir, ".sprite.env")
+	envContent, err := os.ReadFile(envPath)
+	require.NoError(t, err, ".sprite.env should exist")
+	assert.Contains(t, string(envContent), "GITHUB_TOKEN=",
+		"env should contain GITHUB_TOKEN")
+	assert.Contains(t, string(envContent), "SPRITE_TOKEN=",
+		"env should contain SPRITE_TOKEN")
+
+	// Verify templates exist
+	templateDir := filepath.Join(wispDir, "templates", "default")
+	expectedTemplates := []string{
+		"context.md",
+		"create-tasks.md",
+		"update-tasks.md",
+		"review-tasks.md",
+		"iterate.md",
+	}
+	for _, tmpl := range expectedTemplates {
+		tmplPath := filepath.Join(templateDir, tmpl)
+		_, err := os.Stat(tmplPath)
+		assert.NoError(t, err, "template %s should exist", tmpl)
+	}
+}
