@@ -217,7 +217,7 @@ func (l *Loop) Run(ctx context.Context) Result {
 		}
 
 		// Sync state from Sprite to local storage
-		if err := l.sync.SyncFromSprite(ctx, l.session.SpriteName, l.session.Branch, l.repoPath); err != nil {
+		if err := l.sync.SyncFromSprite(ctx, l.session.SpriteName, l.session.Branch); err != nil {
 			return Result{
 				Reason:     ExitReasonCrash,
 				Iterations: l.iteration,

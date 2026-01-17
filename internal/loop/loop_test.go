@@ -930,7 +930,7 @@ func TestNeedsInputFlow(t *testing.T) {
 		ctx := context.Background()
 
 		// Sync from Sprite to local
-		err := syncMgr.SyncFromSprite(ctx, session.SpriteName, branch, repoPath)
+		err := syncMgr.SyncFromSprite(ctx, session.SpriteName, branch)
 		require.NoError(t, err)
 
 		// Verify local state has NEEDS_INPUT status and question
