@@ -3,10 +3,13 @@ package server
 import (
 	"context"
 	"encoding/json"
+	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -444,4 +447,456 @@ func TestAuthEndToEnd(t *testing.T) {
 	if resp2.StatusCode != http.StatusUnauthorized {
 		t.Errorf("expected status %d for wrong password, got %d", http.StatusUnauthorized, resp2.StatusCode)
 	}
+}
+
+// Helper to get an authenticated token for tests
+func getAuthToken(t *testing.T, addr string) string {
+	t.Helper()
+	form := url.Values{}
+	form.Add("password", testPassword)
+	resp, err := http.PostForm("http://"+addr+"/auth", form)
+	if err != nil {
+		t.Fatalf("failed to authenticate: %v", err)
+	}
+	defer resp.Body.Close()
+
+	var response struct {
+		Token string `json:"token"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&response); err != nil {
+		t.Fatalf("failed to parse response: %v", err)
+	}
+	return response.Token
+}
+
+func TestAuthMiddleware(t *testing.T) {
+	server := createTestServer(t)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	go func() {
+		server.Start(ctx)
+	}()
+
+	time.Sleep(50 * time.Millisecond)
+	defer server.Stop()
+
+	addr := server.ListenAddr()
+
+	t.Run("no auth header", func(t *testing.T) {
+		req, _ := http.NewRequest("GET", "http://"+addr+"/stream", nil)
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatalf("failed to make request: %v", err)
+		}
+		defer resp.Body.Close()
+
+		if resp.StatusCode != http.StatusUnauthorized {
+			t.Errorf("expected status %d, got %d", http.StatusUnauthorized, resp.StatusCode)
+		}
+	})
+
+	t.Run("invalid auth format", func(t *testing.T) {
+		req, _ := http.NewRequest("GET", "http://"+addr+"/stream", nil)
+		req.Header.Set("Authorization", "Basic sometoken")
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatalf("failed to make request: %v", err)
+		}
+		defer resp.Body.Close()
+
+		if resp.StatusCode != http.StatusUnauthorized {
+			t.Errorf("expected status %d, got %d", http.StatusUnauthorized, resp.StatusCode)
+		}
+	})
+
+	t.Run("invalid token", func(t *testing.T) {
+		req, _ := http.NewRequest("GET", "http://"+addr+"/stream", nil)
+		req.Header.Set("Authorization", "Bearer invalid-token")
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatalf("failed to make request: %v", err)
+		}
+		defer resp.Body.Close()
+
+		if resp.StatusCode != http.StatusUnauthorized {
+			t.Errorf("expected status %d, got %d", http.StatusUnauthorized, resp.StatusCode)
+		}
+	})
+
+	t.Run("valid token", func(t *testing.T) {
+		token := getAuthToken(t, addr)
+
+		req, _ := http.NewRequest("GET", "http://"+addr+"/stream", nil)
+		req.Header.Set("Authorization", "Bearer "+token)
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatalf("failed to make request: %v", err)
+		}
+		defer resp.Body.Close()
+
+		// Should get through auth (200 or other non-401 status)
+		if resp.StatusCode == http.StatusUnauthorized {
+			t.Errorf("expected authenticated request to succeed")
+		}
+	})
+}
+
+func TestStreamEndpoint(t *testing.T) {
+	server := createTestServer(t)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	go func() {
+		server.Start(ctx)
+	}()
+
+	time.Sleep(50 * time.Millisecond)
+	defer server.Stop()
+
+	addr := server.ListenAddr()
+	token := getAuthToken(t, addr)
+
+	t.Run("wrong method", func(t *testing.T) {
+		req, _ := http.NewRequest("POST", "http://"+addr+"/stream", nil)
+		req.Header.Set("Authorization", "Bearer "+token)
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatalf("failed to make request: %v", err)
+		}
+		defer resp.Body.Close()
+
+		if resp.StatusCode != http.StatusMethodNotAllowed {
+			t.Errorf("expected status %d, got %d", http.StatusMethodNotAllowed, resp.StatusCode)
+		}
+	})
+
+	t.Run("empty stream", func(t *testing.T) {
+		req, _ := http.NewRequest("GET", "http://"+addr+"/stream", nil)
+		req.Header.Set("Authorization", "Bearer "+token)
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatalf("failed to make request: %v", err)
+		}
+		defer resp.Body.Close()
+
+		if resp.StatusCode != http.StatusOK {
+			t.Errorf("expected status %d, got %d", http.StatusOK, resp.StatusCode)
+		}
+
+		// Check headers
+		if resp.Header.Get("Stream-Next-Offset") == "" {
+			t.Error("expected Stream-Next-Offset header")
+		}
+		if resp.Header.Get("Stream-Up-To-Date") != "true" {
+			t.Error("expected Stream-Up-To-Date header to be true for empty stream")
+		}
+
+		// Check body is empty JSON array
+		body, _ := io.ReadAll(resp.Body)
+		if string(body) != "[]" {
+			t.Errorf("expected empty array, got %s", string(body))
+		}
+	})
+
+	t.Run("with messages", func(t *testing.T) {
+		// Broadcast a session to the stream
+		session := &Session{
+			ID:        "test-session",
+			Repo:      "test/repo",
+			Branch:    "main",
+			Spec:      "spec.md",
+			Status:    SessionStatusRunning,
+			Iteration: 1,
+			StartedAt: "2024-01-01T00:00:00Z",
+		}
+		if err := server.Streams().BroadcastSession(session); err != nil {
+			t.Fatalf("failed to broadcast: %v", err)
+		}
+
+		req, _ := http.NewRequest("GET", "http://"+addr+"/stream", nil)
+		req.Header.Set("Authorization", "Bearer "+token)
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatalf("failed to make request: %v", err)
+		}
+		defer resp.Body.Close()
+
+		if resp.StatusCode != http.StatusOK {
+			t.Errorf("expected status %d, got %d", http.StatusOK, resp.StatusCode)
+		}
+
+		body, _ := io.ReadAll(resp.Body)
+		if !strings.Contains(string(body), "test-session") {
+			t.Errorf("expected body to contain session, got %s", string(body))
+		}
+	})
+
+	t.Run("invalid offset", func(t *testing.T) {
+		req, _ := http.NewRequest("GET", "http://"+addr+"/stream?offset=invalid", nil)
+		req.Header.Set("Authorization", "Bearer "+token)
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatalf("failed to make request: %v", err)
+		}
+		defer resp.Body.Close()
+
+		if resp.StatusCode != http.StatusBadRequest {
+			t.Errorf("expected status %d, got %d", http.StatusBadRequest, resp.StatusCode)
+		}
+	})
+}
+
+func TestInputEndpoint(t *testing.T) {
+	server := createTestServer(t)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	go func() {
+		server.Start(ctx)
+	}()
+
+	time.Sleep(50 * time.Millisecond)
+	defer server.Stop()
+
+	addr := server.ListenAddr()
+	token := getAuthToken(t, addr)
+
+	t.Run("wrong method", func(t *testing.T) {
+		req, _ := http.NewRequest("GET", "http://"+addr+"/input", nil)
+		req.Header.Set("Authorization", "Bearer "+token)
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatalf("failed to make request: %v", err)
+		}
+		defer resp.Body.Close()
+
+		if resp.StatusCode != http.StatusMethodNotAllowed {
+			t.Errorf("expected status %d, got %d", http.StatusMethodNotAllowed, resp.StatusCode)
+		}
+	})
+
+	t.Run("invalid JSON", func(t *testing.T) {
+		req, _ := http.NewRequest("POST", "http://"+addr+"/input", strings.NewReader("not json"))
+		req.Header.Set("Authorization", "Bearer "+token)
+		req.Header.Set("Content-Type", "application/json")
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatalf("failed to make request: %v", err)
+		}
+		defer resp.Body.Close()
+
+		if resp.StatusCode != http.StatusBadRequest {
+			t.Errorf("expected status %d, got %d", http.StatusBadRequest, resp.StatusCode)
+		}
+	})
+
+	t.Run("missing request_id", func(t *testing.T) {
+		body := `{"response": "test response"}`
+		req, _ := http.NewRequest("POST", "http://"+addr+"/input", strings.NewReader(body))
+		req.Header.Set("Authorization", "Bearer "+token)
+		req.Header.Set("Content-Type", "application/json")
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatalf("failed to make request: %v", err)
+		}
+		defer resp.Body.Close()
+
+		if resp.StatusCode != http.StatusBadRequest {
+			t.Errorf("expected status %d, got %d", http.StatusBadRequest, resp.StatusCode)
+		}
+	})
+
+	t.Run("valid input", func(t *testing.T) {
+		body := `{"request_id": "req-123", "response": "test response"}`
+		req, _ := http.NewRequest("POST", "http://"+addr+"/input", strings.NewReader(body))
+		req.Header.Set("Authorization", "Bearer "+token)
+		req.Header.Set("Content-Type", "application/json")
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatalf("failed to make request: %v", err)
+		}
+		defer resp.Body.Close()
+
+		if resp.StatusCode != http.StatusOK {
+			bodyBytes, _ := io.ReadAll(resp.Body)
+			t.Errorf("expected status %d, got %d: %s", http.StatusOK, resp.StatusCode, string(bodyBytes))
+		}
+
+		// Verify the input was stored
+		response, ok := server.GetPendingInput("req-123")
+		if !ok {
+			t.Error("expected pending input to be stored")
+		}
+		if response != "test response" {
+			t.Errorf("expected response 'test response', got '%s'", response)
+		}
+
+		// Getting it again should return not found (it's been consumed)
+		_, ok = server.GetPendingInput("req-123")
+		if ok {
+			t.Error("expected pending input to be consumed after first get")
+		}
+	})
+}
+
+func TestStaticEndpoint(t *testing.T) {
+	server := createTestServer(t)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	go func() {
+		server.Start(ctx)
+	}()
+
+	time.Sleep(50 * time.Millisecond)
+	defer server.Stop()
+
+	addr := server.ListenAddr()
+
+	t.Run("root path", func(t *testing.T) {
+		resp, err := http.Get("http://" + addr + "/")
+		if err != nil {
+			t.Fatalf("failed to make request: %v", err)
+		}
+		defer resp.Body.Close()
+
+		if resp.StatusCode != http.StatusOK {
+			t.Errorf("expected status %d, got %d", http.StatusOK, resp.StatusCode)
+		}
+
+		if !strings.Contains(resp.Header.Get("Content-Type"), "text/html") {
+			t.Errorf("expected HTML content type, got %s", resp.Header.Get("Content-Type"))
+		}
+
+		body, _ := io.ReadAll(resp.Body)
+		if !strings.Contains(string(body), "Wisp") {
+			t.Error("expected body to contain 'Wisp'")
+		}
+	})
+
+	t.Run("index.html", func(t *testing.T) {
+		resp, err := http.Get("http://" + addr + "/index.html")
+		if err != nil {
+			t.Fatalf("failed to make request: %v", err)
+		}
+		defer resp.Body.Close()
+
+		if resp.StatusCode != http.StatusOK {
+			t.Errorf("expected status %d, got %d", http.StatusOK, resp.StatusCode)
+		}
+	})
+
+	t.Run("unknown path", func(t *testing.T) {
+		resp, err := http.Get("http://" + addr + "/unknown")
+		if err != nil {
+			t.Fatalf("failed to make request: %v", err)
+		}
+		defer resp.Body.Close()
+
+		if resp.StatusCode != http.StatusNotFound {
+			t.Errorf("expected status %d, got %d", http.StatusNotFound, resp.StatusCode)
+		}
+	})
+}
+
+func TestStreamLongPoll(t *testing.T) {
+	server := createTestServer(t)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	go func() {
+		server.Start(ctx)
+	}()
+
+	time.Sleep(50 * time.Millisecond)
+	defer server.Stop()
+
+	addr := server.ListenAddr()
+	token := getAuthToken(t, addr)
+
+	t.Run("long-poll receives new message", func(t *testing.T) {
+		// Get current offset
+		req, _ := http.NewRequest("GET", "http://"+addr+"/stream?offset=now", nil)
+		req.Header.Set("Authorization", "Bearer "+token)
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatalf("failed to make request: %v", err)
+		}
+		offset := resp.Header.Get("Stream-Next-Offset")
+		resp.Body.Close()
+
+		// Start long-poll in goroutine
+		resultCh := make(chan int, 1)
+		go func() {
+			req, _ := http.NewRequest("GET", "http://"+addr+"/stream?live=long-poll&offset="+offset, nil)
+			req.Header.Set("Authorization", "Bearer "+token)
+			client := &http.Client{Timeout: 5 * time.Second}
+			resp, err := client.Do(req)
+			if err != nil {
+				resultCh <- -1
+				return
+			}
+			defer resp.Body.Close()
+			resultCh <- resp.StatusCode
+		}()
+
+		// Wait a bit and broadcast a message
+		time.Sleep(100 * time.Millisecond)
+		task := &Task{
+			ID:        "task-1",
+			SessionID: "test-session",
+			Order:     1,
+			Content:   "Test task",
+			Status:    TaskStatusPending,
+		}
+		server.Streams().BroadcastTask(task)
+
+		// Wait for result
+		select {
+		case status := <-resultCh:
+			if status != http.StatusOK {
+				t.Errorf("expected status %d, got %d", http.StatusOK, status)
+			}
+		case <-time.After(3 * time.Second):
+			t.Error("long-poll did not return in time")
+		}
+	})
+}
+
+func TestPendingInputConcurrency(t *testing.T) {
+	server := createTestServer(t)
+
+	// Test concurrent access to pending inputs
+	var wg sync.WaitGroup
+	for i := 0; i < 10; i++ {
+		wg.Add(1)
+		go func(id int) {
+			defer wg.Done()
+			reqID := fmt.Sprintf("req-%d", id)
+
+			// Store
+			server.mu.Lock()
+			if server.pendingInputs == nil {
+				server.pendingInputs = make(map[string]string)
+			}
+			server.pendingInputs[reqID] = fmt.Sprintf("response-%d", id)
+			server.mu.Unlock()
+
+			// Retrieve
+			resp, ok := server.GetPendingInput(reqID)
+			if !ok {
+				t.Errorf("expected to find input %s", reqID)
+			}
+			if resp != fmt.Sprintf("response-%d", id) {
+				t.Errorf("wrong response for %s", reqID)
+			}
+		}(i)
+	}
+	wg.Wait()
 }
