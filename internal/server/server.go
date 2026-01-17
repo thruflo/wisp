@@ -31,6 +31,9 @@ type Server struct {
 	mu     sync.RWMutex
 	tokens map[string]time.Time // token -> expiry time
 
+	// Durable Streams
+	streams *StreamManager
+
 	// Lifecycle
 	started bool
 }
@@ -50,10 +53,16 @@ func NewServer(cfg *Config) (*Server, error) {
 		return nil, errors.New("password hash is required")
 	}
 
+	streams, err := NewStreamManager()
+	if err != nil {
+		return nil, fmt.Errorf("failed to create stream manager: %w", err)
+	}
+
 	return &Server{
 		port:         cfg.Port,
 		passwordHash: cfg.PasswordHash,
 		tokens:       make(map[string]time.Time),
+		streams:      streams,
 	}, nil
 }
 
@@ -133,8 +142,18 @@ func (s *Server) Stop() error {
 		return fmt.Errorf("shutdown error: %w", err)
 	}
 
+	// Close the stream manager
+	if s.streams != nil {
+		s.streams.Close()
+	}
+
 	s.started = false
 	return nil
+}
+
+// Streams returns the StreamManager for broadcasting state.
+func (s *Server) Streams() *StreamManager {
+	return s.streams
 }
 
 // ListenAddr returns the actual address the server is listening on.
