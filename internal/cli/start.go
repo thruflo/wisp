@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
+	"github.com/thruflo/wisp/internal/auth"
 	"github.com/thruflo/wisp/internal/config"
 	"github.com/thruflo/wisp/internal/loop"
 	"github.com/thruflo/wisp/internal/sprite"
@@ -19,14 +20,16 @@ import (
 )
 
 var (
-	startRepo        string
-	startSpec        string
-	startSiblingRepo []string
-	startBranch      string
-	startTemplate    string
-	startCheckpoint  string
-	startHeadless    bool
-	startContinue    bool
+	startRepo         string
+	startSpec         string
+	startSiblingRepo  []string
+	startBranch       string
+	startTemplate     string
+	startCheckpoint   string
+	startHeadless     bool
+	startServer       bool
+	startServerPort   int
+	startSetPassword  bool
 )
 
 // HeadlessResult is the JSON output format for headless mode.
@@ -66,6 +69,9 @@ func init() {
 	startCmd.Flags().StringVarP(&startCheckpoint, "checkpoint", "c", "", "checkpoint ID to restore from")
 	startCmd.Flags().BoolVar(&startHeadless, "headless", false, "run without TUI, print JSON result to stdout (for testing/CI)")
 	startCmd.Flags().BoolVar(&startContinue, "continue", false, "continue on existing branch instead of creating new")
+	startCmd.Flags().BoolVar(&startServer, "server", false, "start web server alongside TUI for remote access")
+	startCmd.Flags().IntVar(&startServerPort, "port", config.DefaultServerPort, "web server port (requires --server)")
+	startCmd.Flags().BoolVar(&startSetPassword, "password", false, "prompt to set/change web server password")
 
 	startCmd.MarkFlagRequired("repo")
 	startCmd.MarkFlagRequired("spec")
@@ -99,6 +105,13 @@ func runStart(cmd *cobra.Command, args []string) error {
 	cfg, err := config.LoadConfig(cwd)
 	if err != nil {
 		return fmt.Errorf("failed to load config: %w", err)
+	}
+
+	// Handle server mode and password setup
+	if startServer || startSetPassword {
+		if err := handleServerPassword(cwd, cfg, startServer, startSetPassword, startServerPort); err != nil {
+			return err
+		}
 	}
 
 	// Load settings
@@ -675,4 +688,50 @@ func RunCreateTasksPrompt(ctx context.Context, client sprite.Client, session *co
 
 	return sprite.RunTasksPrompt(ctx, client, session.SpriteName, repoPath,
 		createTasksPath, "RFC path: "+RemoteSpecPath, contextPath, 50)
+}
+
+// handleServerPassword handles password setup for the web server.
+// It prompts for a password if needed and saves the hash to config.
+func handleServerPassword(basePath string, cfg *config.Config, serverEnabled, setPassword bool, port int) error {
+	// Initialize server config if not present
+	if cfg.Server == nil {
+		cfg.Server = config.DefaultServerConfig()
+	}
+
+	// Update port from flag
+	cfg.Server.Port = port
+
+	// Check if we need to prompt for password
+	needsPassword := false
+
+	if setPassword {
+		// User explicitly wants to set/change password
+		needsPassword = true
+	} else if serverEnabled && cfg.Server.PasswordHash == "" {
+		// Server mode enabled but no password configured
+		needsPassword = true
+	}
+
+	if needsPassword {
+		password, err := auth.PromptAndConfirmPassword()
+		if err != nil {
+			return fmt.Errorf("password setup failed: %w", err)
+		}
+
+		hash, err := auth.HashPassword(password)
+		if err != nil {
+			return fmt.Errorf("failed to hash password: %w", err)
+		}
+
+		cfg.Server.PasswordHash = hash
+
+		// Save the updated config
+		if err := config.SaveConfig(basePath, cfg); err != nil {
+			return fmt.Errorf("failed to save config: %w", err)
+		}
+
+		fmt.Println("Password saved to config.")
+	}
+
+	return nil
 }

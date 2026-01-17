@@ -243,3 +243,24 @@ func IsValidationError(err error) bool {
 	var ve ValidationError
 	return errors.As(err, &ve)
 }
+
+// SaveConfig writes the config to .wisp/config.yaml at the given base path.
+// Creates the .wisp directory if it doesn't exist.
+func SaveConfig(basePath string, cfg *Config) error {
+	wispDir := filepath.Join(basePath, ".wisp")
+	if err := os.MkdirAll(wispDir, 0o755); err != nil {
+		return fmt.Errorf("failed to create .wisp directory: %w", err)
+	}
+
+	data, err := yaml.Marshal(cfg)
+	if err != nil {
+		return fmt.Errorf("failed to marshal config: %w", err)
+	}
+
+	configPath := filepath.Join(wispDir, "config.yaml")
+	if err := os.WriteFile(configPath, data, 0o644); err != nil {
+		return fmt.Errorf("failed to write config file: %w", err)
+	}
+
+	return nil
+}

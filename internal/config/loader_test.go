@@ -684,3 +684,109 @@ func TestValidateServerConfig(t *testing.T) {
 		})
 	}
 }
+
+func TestSaveConfig(t *testing.T) {
+	t.Parallel()
+
+	tmpDir := t.TempDir()
+
+	cfg := &Config{
+		Limits: Limits{
+			MaxIterations:       100,
+			MaxBudgetUSD:        50.0,
+			MaxDurationHours:    8.0,
+			NoProgressThreshold: 5,
+		},
+	}
+
+	err := SaveConfig(tmpDir, cfg)
+	require.NoError(t, err)
+
+	// Load it back
+	loaded, err := LoadConfig(tmpDir)
+	require.NoError(t, err)
+
+	assert.Equal(t, cfg.Limits.MaxIterations, loaded.Limits.MaxIterations)
+	assert.Equal(t, cfg.Limits.MaxBudgetUSD, loaded.Limits.MaxBudgetUSD)
+}
+
+func TestSaveConfig_WithServer(t *testing.T) {
+	t.Parallel()
+
+	tmpDir := t.TempDir()
+
+	cfg := &Config{
+		Limits: Limits{
+			MaxIterations:       50,
+			MaxBudgetUSD:        20.0,
+			MaxDurationHours:    4.0,
+			NoProgressThreshold: 3,
+		},
+		Server: &ServerConfig{
+			Port:         9000,
+			PasswordHash: "$argon2id$v=19$m=65536,t=3,p=4$testsalt$testhash",
+		},
+	}
+
+	err := SaveConfig(tmpDir, cfg)
+	require.NoError(t, err)
+
+	// Load it back
+	loaded, err := LoadConfig(tmpDir)
+	require.NoError(t, err)
+
+	require.NotNil(t, loaded.Server)
+	assert.Equal(t, 9000, loaded.Server.Port)
+	assert.Equal(t, "$argon2id$v=19$m=65536,t=3,p=4$testsalt$testhash", loaded.Server.PasswordHash)
+}
+
+func TestSaveConfig_CreatesWispDir(t *testing.T) {
+	t.Parallel()
+
+	tmpDir := t.TempDir()
+
+	cfg := DefaultConfig()
+	err := SaveConfig(tmpDir, &cfg)
+	require.NoError(t, err)
+
+	// Verify .wisp directory was created
+	wispDir := filepath.Join(tmpDir, ".wisp")
+	info, err := os.Stat(wispDir)
+	require.NoError(t, err)
+	assert.True(t, info.IsDir())
+}
+
+func TestSaveConfig_OverwritesExisting(t *testing.T) {
+	t.Parallel()
+
+	tmpDir := t.TempDir()
+
+	// Save initial config
+	cfg1 := &Config{
+		Limits: Limits{
+			MaxIterations:       10,
+			MaxBudgetUSD:        5.0,
+			MaxDurationHours:    1.0,
+			NoProgressThreshold: 1,
+		},
+	}
+	err := SaveConfig(tmpDir, cfg1)
+	require.NoError(t, err)
+
+	// Save updated config
+	cfg2 := &Config{
+		Limits: Limits{
+			MaxIterations:       200,
+			MaxBudgetUSD:        100.0,
+			MaxDurationHours:    24.0,
+			NoProgressThreshold: 10,
+		},
+	}
+	err = SaveConfig(tmpDir, cfg2)
+	require.NoError(t, err)
+
+	// Load and verify it's the second config
+	loaded, err := LoadConfig(tmpDir)
+	require.NoError(t, err)
+	assert.Equal(t, 200, loaded.Limits.MaxIterations)
+}
