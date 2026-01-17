@@ -2,11 +2,13 @@ package sprite
 
 import (
 	"context"
-	"crypto/sha256"
+	"crypto/rand"
 	"encoding/hex"
 	"fmt"
 	"io"
+	"regexp"
 	"strings"
+	"time"
 
 	sprites "github.com/superfly/sprites-go"
 )
@@ -93,7 +95,21 @@ func NewSDKClient(token string) *SDKClient {
 func (c *SDKClient) Create(ctx context.Context, name string, checkpoint string) error {
 	_, err := c.client.CreateSprite(ctx, name, nil)
 	if err != nil {
-		return fmt.Errorf("failed to create sprite %s: %w", name, err)
+		// TEMPORARY WORKAROUND: The Sprites API has a bug where it returns HTTP 500
+		// but actually creates the sprite successfully. When we get a 500 error,
+		// poll to check if the sprite was actually created and is responsive.
+		// See: https://github.com/superfly/sprites-go/issues/XXX (TODO: file bug)
+		//
+		// Remove this workaround once the Sprites API is fixed.
+		if apiErr := sprites.IsAPIError(err); apiErr != nil && apiErr.StatusCode == 500 {
+			if c.waitForSpriteReady(ctx, name) {
+				// Sprite was created despite the 500 error
+				err = nil
+			}
+		}
+		if err != nil {
+			return fmt.Errorf("failed to create sprite %s: %w", name, err)
+		}
 	}
 
 	if checkpoint != "" {
@@ -113,6 +129,62 @@ func (c *SDKClient) Create(ctx context.Context, name string, checkpoint string) 
 	}
 
 	return nil
+}
+
+// waitForSpriteReady polls to check if a sprite exists and can execute commands.
+// This is a workaround for a Sprites API bug where CreateSprite returns 500 but
+// actually creates the sprite. Returns true if sprite becomes ready, false otherwise.
+func (c *SDKClient) waitForSpriteReady(ctx context.Context, name string) bool {
+	const (
+		maxWait      = 15 * time.Second
+		pollInterval = 500 * time.Millisecond
+	)
+
+	fmt.Printf("Sprites API returned 500, polling to check if sprite %q was created...\n", name)
+	deadline := time.Now().Add(maxWait)
+	attempt := 0
+	for time.Now().Before(deadline) {
+		attempt++
+		// Check if context is cancelled
+		select {
+		case <-ctx.Done():
+			fmt.Printf("Context cancelled while waiting for sprite\n")
+			return false
+		default:
+		}
+
+		// Check if sprite exists
+		exists, err := c.Exists(ctx, name)
+		if err != nil {
+			if attempt == 1 || attempt%10 == 0 {
+				fmt.Printf("  [%d] Exists check error: %v\n", attempt, err)
+			}
+			time.Sleep(pollInterval)
+			continue
+		}
+		if !exists {
+			if attempt == 1 || attempt%10 == 0 {
+				fmt.Printf("  [%d] Sprite does not exist yet\n", attempt)
+			}
+			time.Sleep(pollInterval)
+			continue
+		}
+
+		// Try to run a simple command to verify the sprite is responsive
+		_, stderr, exitCode, err := c.ExecuteOutput(ctx, name, "", nil, "true")
+		if err == nil && exitCode == 0 {
+			fmt.Printf("Sprite %q is ready (attempt %d)\n", name, attempt)
+			return true
+		}
+		if attempt == 1 || attempt%10 == 0 {
+			fmt.Printf("  [%d] Command failed: err=%v, exitCode=%d, stderr=%s\n", attempt, err, exitCode, string(stderr))
+		}
+
+		time.Sleep(pollInterval)
+	}
+
+	fmt.Printf("Sprite %q did not become ready after %v\n", name, maxWait)
+	return false
 }
 
 // Execute runs a command on the Sprite and returns pipes for streaming.
@@ -240,11 +312,50 @@ func (c *SDKClient) Exists(ctx context.Context, name string) (bool, error) {
 	return true, nil
 }
 
-// GenerateSpriteName creates a deterministic sprite name from repo and branch.
-// Format: wisp-<8-char-hash>
+// GenerateSpriteName creates a sprite name from the branch with random suffix.
+// Format: wisp-<branch-slug>-<6-random-chars>
 func GenerateSpriteName(repo, branch string) string {
-	input := repo + ":" + branch
-	hash := sha256.Sum256([]byte(input))
-	hashStr := hex.EncodeToString(hash[:])
-	return "wisp-" + hashStr[:8]
+	// Strip wisp/ prefix to avoid double-prefixing (wisp-wisp-...)
+	branch = strings.TrimPrefix(branch, "wisp/")
+	slug := slugify(branch)
+	randomSuffix := randomHex(6)
+	return "wisp-" + slug + "-" + randomSuffix
+}
+
+// slugify converts a branch name to a URL-safe slug.
+// It lowercases, replaces non-alphanumeric with dashes, collapses multiple dashes,
+// and truncates to 20 chars max.
+func slugify(s string) string {
+	// Lowercase
+	s = strings.ToLower(s)
+
+	// Replace non-alphanumeric characters with dashes
+	re := regexp.MustCompile(`[^a-z0-9]+`)
+	s = re.ReplaceAllString(s, "-")
+
+	// Trim leading/trailing dashes
+	s = strings.Trim(s, "-")
+
+	// Truncate to 20 chars max, avoiding trailing dash
+	if len(s) > 20 {
+		s = s[:20]
+		s = strings.TrimRight(s, "-")
+	}
+
+	// Handle empty result
+	if s == "" {
+		s = "branch"
+	}
+
+	return s
+}
+
+// randomHex generates n random hex characters.
+func randomHex(n int) string {
+	bytes := make([]byte, (n+1)/2)
+	if _, err := rand.Read(bytes); err != nil {
+		// Fallback to a fixed string if crypto/rand fails (very unlikely)
+		return strings.Repeat("0", n)
+	}
+	return hex.EncodeToString(bytes)[:n]
 }

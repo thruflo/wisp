@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -476,28 +477,34 @@ func TestGenerateSpriteName(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
-		name   string
-		repo   string
-		branch string
-		want   string
+		name         string
+		repo         string
+		branch       string
+		expectedSlug string
 	}{
 		{
-			name:   "basic repo and branch",
-			repo:   "electric-sql/electric",
-			branch: "wisp/feat-auth",
-			want:   "wisp-c1f8b2e4", // pre-computed hash
+			name:         "basic branch",
+			repo:         "electric-sql/electric",
+			branch:       "foo",
+			expectedSlug: "foo",
 		},
 		{
-			name:   "different repo same branch",
-			repo:   "TanStack/db",
-			branch: "wisp/feat-auth",
-			want:   "wisp-f6a1d9e3", // different hash
+			name:         "branch with wisp/ prefix",
+			repo:         "electric-sql/electric",
+			branch:       "wisp/feat-auth",
+			expectedSlug: "feat-auth",
 		},
 		{
-			name:   "same repo different branch",
-			repo:   "electric-sql/electric",
-			branch: "wisp/other-feature",
-			want:   "wisp-a3e7c5f1", // different hash
+			name:         "branch with special chars",
+			repo:         "TanStack/db",
+			branch:       "feature/add_user",
+			expectedSlug: "feature-add-user",
+		},
+		{
+			name:         "uppercase branch",
+			repo:         "electric-sql/electric",
+			branch:       "Feature/MyBranch",
+			expectedSlug: "feature-mybranch",
 		},
 	}
 
@@ -507,54 +514,49 @@ func TestGenerateSpriteName(t *testing.T) {
 
 			got := GenerateSpriteName(tt.repo, tt.branch)
 
-			// Check format: wisp-XXXXXXXX (8 hex chars)
-			assert.True(t, len(got) == 13, "expected length 13, got %d", len(got))
-			assert.True(t, got[:5] == "wisp-", "expected prefix 'wisp-', got %s", got[:5])
+			// Check format: wisp-<slug>-<6-hex-chars>
+			assert.True(t, strings.HasPrefix(got, "wisp-"), "expected prefix 'wisp-', got %s", got)
+			assert.True(t, strings.HasPrefix(got, "wisp-"+tt.expectedSlug+"-"),
+				"expected slug %q in name, got %s", tt.expectedSlug, got)
 
-			// Verify determinism
-			got2 := GenerateSpriteName(tt.repo, tt.branch)
-			assert.Equal(t, got, got2, "expected deterministic result")
+			// Extract the random suffix (last 6 chars)
+			parts := strings.Split(got, "-")
+			suffix := parts[len(parts)-1]
+			assert.Equal(t, 6, len(suffix), "expected 6-char random suffix, got %d chars: %s", len(suffix), suffix)
 		})
 	}
 }
 
-func TestGenerateSpriteName_Deterministic(t *testing.T) {
+func TestGenerateSpriteName_RandomSuffix(t *testing.T) {
 	t.Parallel()
 
 	repo := "org/repo"
-	branch := "wisp/feature"
+	branch := "feature"
 
-	results := make([]string, 10)
-	for i := 0; i < 10; i++ {
-		results[i] = GenerateSpriteName(repo, branch)
-	}
-
-	// All results should be identical
-	for i := 1; i < 10; i++ {
-		assert.Equal(t, results[0], results[i], "GenerateSpriteName should be deterministic")
-	}
-}
-
-func TestGenerateSpriteName_Uniqueness(t *testing.T) {
-	t.Parallel()
-
-	// Different inputs should produce different names
+	// Generate multiple names and verify they're different (random)
 	names := make(map[string]bool)
-
-	inputs := []struct{ repo, branch string }{
-		{"org/repo1", "branch1"},
-		{"org/repo1", "branch2"},
-		{"org/repo2", "branch1"},
-		{"org/repo2", "branch2"},
-		{"other/project", "main"},
-		{"other/project", "develop"},
-	}
-
-	for _, input := range inputs {
-		name := GenerateSpriteName(input.repo, input.branch)
-		assert.False(t, names[name], "duplicate name generated for %s:%s", input.repo, input.branch)
+	for i := 0; i < 10; i++ {
+		name := GenerateSpriteName(repo, branch)
 		names[name] = true
 	}
+
+	// With random suffixes, we should get 10 unique names
+	assert.Equal(t, 10, len(names), "expected 10 unique names with random suffixes")
+}
+
+func TestGenerateSpriteName_SlugTruncation(t *testing.T) {
+	t.Parallel()
+
+	repo := "org/repo"
+	branch := "this-is-a-very-long-branch-name-that-should-be-truncated"
+
+	got := GenerateSpriteName(repo, branch)
+
+	// The slug portion should be max 20 chars
+	// Format: wisp-<slug>-<6-hex>
+	// Total should be: 5 (wisp-) + max 20 (slug) + 1 (-) + 6 (hex) = max 32
+	assert.True(t, len(got) <= 32, "name too long: %s (len=%d)", got, len(got))
+	assert.True(t, strings.HasPrefix(got, "wisp-"), "expected prefix 'wisp-', got %s", got)
 }
 
 // Verify Client interface is satisfied
