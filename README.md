@@ -28,10 +28,10 @@ Rebuilds to `$GOPATH/bin`. Run again after changes.
 ### Running tests
 
 ```bash
-go test ./...                                           # unit tests
-make test-integration                                   # integration tests (mocks)
-make test-real-sprites                                  # real Sprite tests
-make test-e2e                                           # E2E CLI tests
+make test                            # unit tests
+make test-integration                # integration tests (mocks)
+make test-real-sprites               # real Sprite tests
+make test-e2e                        # E2E CLI tests
 ```
 
 See [Testing Guide](docs/testing.md) for credentials setup, debugging, and cleanup.

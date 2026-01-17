@@ -24,6 +24,7 @@ pkg/                # public API (if any)
 - Errors are values — handle explicitly, no panics for recoverable errors
 - Accept interfaces, return structs
 - Keep packages focused and minimal
+- when you build, build with `go install ./cmd/wisp` not `go build -o wisp ./cmd/wisp`
 
 ## CLI patterns
 
