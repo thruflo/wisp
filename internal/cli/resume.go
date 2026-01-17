@@ -174,7 +174,7 @@ func runResume(cmd *cobra.Command, args []string) error {
 }
 
 // setupSpriteForResume creates and configures a fresh Sprite for resuming a session.
-// Unlike setupSprite for start, this checks out an existing branch instead of creating one.
+// Unlike SetupSprite for start, this checks out an existing branch instead of creating one.
 func setupSpriteForResume(
 	ctx context.Context,
 	client sprite.Client,
@@ -203,7 +203,7 @@ func setupSpriteForResume(
 
 	// Clone primary repo
 	fmt.Printf("Cloning %s...\n", session.Repo)
-	if err := cloneRepo(ctx, client, session.SpriteName, session.Repo, repoPath); err != nil {
+	if err := CloneRepo(ctx, client, session.SpriteName, session.Repo, repoPath); err != nil {
 		return "", fmt.Errorf("failed to clone repo: %w", err)
 	}
 
@@ -223,7 +223,7 @@ func setupSpriteForResume(
 		siblingPath := filepath.Join("/home/sprite", siblingOrg, siblingRepo)
 
 		fmt.Printf("Cloning sibling %s...\n", sibling)
-		if err := cloneRepo(ctx, client, session.SpriteName, sibling, siblingPath); err != nil {
+		if err := CloneRepo(ctx, client, session.SpriteName, sibling, siblingPath); err != nil {
 			return "", fmt.Errorf("failed to clone sibling %s: %w", sibling, err)
 		}
 	}
@@ -243,7 +243,7 @@ func setupSpriteForResume(
 
 	// Inject environment variables by writing them to Sprite
 	fmt.Printf("Injecting environment...\n")
-	if err := injectEnvVars(ctx, client, session.SpriteName, env); err != nil {
+	if err := InjectEnvVars(ctx, client, session.SpriteName, env); err != nil {
 		return "", fmt.Errorf("failed to inject env vars: %w", err)
 	}
 

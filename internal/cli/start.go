@@ -140,7 +140,7 @@ func runStart(cmd *cobra.Command, args []string) error {
 	fmt.Printf("  Sprite: %s\n", spriteName)
 
 	// Setup Sprite
-	repoPath, err := setupSprite(ctx, client, syncMgr, session, settings, env, cwd)
+	repoPath, err := SetupSprite(ctx, client, syncMgr, session, settings, env, cwd)
 	if err != nil {
 		return fmt.Errorf("failed to setup sprite: %w", err)
 	}
@@ -152,7 +152,7 @@ func runStart(cmd *cobra.Command, args []string) error {
 
 	// Run create-tasks prompt
 	fmt.Printf("Generating tasks from RFC...\n")
-	if err := runCreateTasksPrompt(ctx, client, session, repoPath); err != nil {
+	if err := RunCreateTasksPrompt(ctx, client, session, repoPath); err != nil {
 		return fmt.Errorf("failed to generate tasks: %w", err)
 	}
 
@@ -251,8 +251,12 @@ func slugify(s string) string {
 	return s
 }
 
-// setupSprite creates and configures the Sprite for the session.
-func setupSprite(
+// SetupSprite creates and configures a Sprite for a session.
+// It creates the Sprite, clones repositories, creates a branch, copies settings
+// and templates, and injects environment variables.
+// Returns the repository path on the Sprite.
+// Exported for testing.
+func SetupSprite(
 	ctx context.Context,
 	client sprite.Client,
 	syncMgr *state.SyncManager,
@@ -279,13 +283,13 @@ func setupSprite(
 
 	// Clone primary repo
 	fmt.Printf("Cloning %s...\n", session.Repo)
-	if err := cloneRepo(ctx, client, session.SpriteName, session.Repo, repoPath); err != nil {
+	if err := CloneRepo(ctx, client, session.SpriteName, session.Repo, repoPath); err != nil {
 		return "", fmt.Errorf("failed to clone repo: %w", err)
 	}
 
 	// Create and checkout branch
 	fmt.Printf("Creating branch %s...\n", session.Branch)
-	if err := createBranch(ctx, client, session.SpriteName, repoPath, session.Branch); err != nil {
+	if err := CreateBranch(ctx, client, session.SpriteName, repoPath, session.Branch); err != nil {
 		return "", fmt.Errorf("failed to create branch: %w", err)
 	}
 
@@ -299,7 +303,7 @@ func setupSprite(
 		siblingPath := filepath.Join("/home/sprite", siblingOrg, siblingRepo)
 
 		fmt.Printf("Cloning sibling %s...\n", sibling)
-		if err := cloneRepo(ctx, client, session.SpriteName, sibling, siblingPath); err != nil {
+		if err := CloneRepo(ctx, client, session.SpriteName, sibling, siblingPath); err != nil {
 			return "", fmt.Errorf("failed to clone sibling %s: %w", sibling, err)
 		}
 	}
@@ -319,21 +323,22 @@ func setupSprite(
 
 	// Inject environment variables by writing them to Sprite
 	fmt.Printf("Injecting environment...\n")
-	if err := injectEnvVars(ctx, client, session.SpriteName, env); err != nil {
+	if err := InjectEnvVars(ctx, client, session.SpriteName, env); err != nil {
 		return "", fmt.Errorf("failed to inject env vars: %w", err)
 	}
 
 	// Copy Claude credentials for Claude Max authentication
 	fmt.Printf("Copying Claude credentials...\n")
-	if err := copyClaudeCredentials(ctx, client, session.SpriteName); err != nil {
+	if err := sprite.CopyClaudeCredentials(ctx, client, session.SpriteName); err != nil {
 		return "", fmt.Errorf("failed to copy Claude credentials: %w", err)
 	}
 
 	return repoPath, nil
 }
 
-// cloneRepo clones a GitHub repository to the specified path on the Sprite.
-func cloneRepo(ctx context.Context, client sprite.Client, spriteName, repo, destPath string) error {
+// CloneRepo clones a GitHub repository to the specified path on a Sprite.
+// Exported for testing.
+func CloneRepo(ctx context.Context, client sprite.Client, spriteName, repo, destPath string) error {
 	// Ensure parent directory exists
 	parentDir := filepath.Dir(destPath)
 	mkdirCmd := fmt.Sprintf("mkdir -p %s", parentDir)
@@ -359,8 +364,9 @@ func cloneRepo(ctx context.Context, client sprite.Client, spriteName, repo, dest
 	return nil
 }
 
-// createBranch creates and checks out a new branch in the repository.
-func createBranch(ctx context.Context, client sprite.Client, spriteName, repoPath, branch string) error {
+// CreateBranch creates and checks out a new branch in a repository on a Sprite.
+// Exported for testing.
+func CreateBranch(ctx context.Context, client sprite.Client, spriteName, repoPath, branch string) error {
 	// Create and checkout branch (or checkout if it exists)
 	branchCmd := fmt.Sprintf("git checkout -B %s", branch)
 	cmd, err := client.Execute(ctx, spriteName, repoPath, nil, "bash", "-c", branchCmd)
@@ -374,8 +380,9 @@ func createBranch(ctx context.Context, client sprite.Client, spriteName, repoPat
 	return nil
 }
 
-// injectEnvVars writes environment variables to the Sprite's shell profile.
-func injectEnvVars(ctx context.Context, client sprite.Client, spriteName string, env map[string]string) error {
+// InjectEnvVars writes environment variables to a Sprite's shell profile (.bashrc).
+// Exported for testing.
+func InjectEnvVars(ctx context.Context, client sprite.Client, spriteName string, env map[string]string) error {
 	if len(env) == 0 {
 		return nil
 	}
@@ -397,60 +404,9 @@ func injectEnvVars(ctx context.Context, client sprite.Client, spriteName string,
 	return nil
 }
 
-// copyClaudeCredentials copies local Claude credentials to the Sprite for Claude Max auth.
-// This reads from ~/.config/claude/ locally and writes to /home/sprite/.config/claude/ on the Sprite.
-func copyClaudeCredentials(ctx context.Context, client sprite.Client, spriteName string) error {
-	homeDir, err := os.UserHomeDir()
-	if err != nil {
-		return fmt.Errorf("failed to get home directory: %w", err)
-	}
-
-	claudeConfigDir := filepath.Join(homeDir, ".config", "claude")
-
-	// Check if local credentials exist
-	if _, err := os.Stat(claudeConfigDir); os.IsNotExist(err) {
-		return fmt.Errorf("Claude credentials not found at %s; run 'claude login' first", claudeConfigDir)
-	}
-
-	// Create .config/claude directory on Sprite
-	mkdirCmd := "mkdir -p /home/sprite/.config/claude"
-	cmd, err := client.Execute(ctx, spriteName, "", nil, "bash", "-c", mkdirCmd)
-	if err != nil {
-		return fmt.Errorf("failed to create config directory: %w", err)
-	}
-	if err := cmd.Wait(); err != nil {
-		return fmt.Errorf("failed to create config directory: %w", err)
-	}
-
-	// Copy all files from local claude config to Sprite
-	entries, err := os.ReadDir(claudeConfigDir)
-	if err != nil {
-		return fmt.Errorf("failed to read claude config directory: %w", err)
-	}
-
-	for _, entry := range entries {
-		if entry.IsDir() {
-			continue // Skip subdirectories for now
-		}
-
-		localPath := filepath.Join(claudeConfigDir, entry.Name())
-		remotePath := filepath.Join("/home/sprite/.config/claude", entry.Name())
-
-		content, err := os.ReadFile(localPath)
-		if err != nil {
-			return fmt.Errorf("failed to read %s: %w", localPath, err)
-		}
-
-		if err := client.WriteFile(ctx, spriteName, remotePath, content); err != nil {
-			return fmt.Errorf("failed to write %s to sprite: %w", remotePath, err)
-		}
-	}
-
-	return nil
-}
-
-// runCreateTasksPrompt runs Claude with the create-tasks prompt to generate tasks.json.
-func runCreateTasksPrompt(ctx context.Context, client sprite.Client, session *config.Session, repoPath string) error {
+// RunCreateTasksPrompt runs Claude with the create-tasks prompt to generate tasks.json.
+// Exported for testing.
+func RunCreateTasksPrompt(ctx context.Context, client sprite.Client, session *config.Session, repoPath string) error {
 	wispPath := filepath.Join(repoPath, ".wisp")
 	createTasksPath := filepath.Join(wispPath, "create-tasks.md")
 	contextPath := filepath.Join(wispPath, "context.md")
