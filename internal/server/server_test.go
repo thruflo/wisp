@@ -900,3 +900,176 @@ func TestPendingInputConcurrency(t *testing.T) {
 	}
 	wg.Wait()
 }
+
+// Tests for static asset serving
+
+func TestHandleStatic(t *testing.T) {
+	server := createTestServer(t)
+
+	tests := []struct {
+		name           string
+		method         string
+		path           string
+		accept         string
+		wantStatus     int
+		wantType       string
+		wantContains   string
+		wantCacheCtrl  string
+	}{
+		{
+			name:          "root returns index.html",
+			method:        "GET",
+			path:          "/",
+			wantStatus:    http.StatusOK,
+			wantType:      "text/html; charset=utf-8",
+			wantContains:  "Wisp",
+			wantCacheCtrl: "no-cache",
+		},
+		{
+			name:          "explicit index.html",
+			method:        "GET",
+			path:          "/index.html",
+			wantStatus:    http.StatusOK,
+			wantType:      "text/html; charset=utf-8",
+			wantContains:  "<!DOCTYPE html>",
+			wantCacheCtrl: "no-cache",
+		},
+		{
+			name:       "HEAD request works",
+			method:     "HEAD",
+			path:       "/",
+			wantStatus: http.StatusOK,
+			wantType:   "text/html; charset=utf-8",
+		},
+		{
+			name:       "POST not allowed",
+			method:     "POST",
+			path:       "/",
+			wantStatus: http.StatusMethodNotAllowed,
+		},
+		{
+			name:       "PUT not allowed",
+			method:     "PUT",
+			path:       "/",
+			wantStatus: http.StatusMethodNotAllowed,
+		},
+		{
+			name:       "nonexistent file returns 404",
+			method:     "GET",
+			path:       "/nonexistent.txt",
+			wantStatus: http.StatusNotFound,
+		},
+		{
+			name:         "nonexistent path with HTML accept returns index.html (SPA support)",
+			method:       "GET",
+			path:         "/some/spa/route",
+			accept:       "text/html",
+			wantStatus:   http.StatusOK,
+			wantType:     "text/html; charset=utf-8",
+			wantContains: "<!DOCTYPE html>",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			req := httptest.NewRequest(tt.method, tt.path, nil)
+			if tt.accept != "" {
+				req.Header.Set("Accept", tt.accept)
+			}
+			w := httptest.NewRecorder()
+
+			server.handleStatic(w, req)
+
+			resp := w.Result()
+			if resp.StatusCode != tt.wantStatus {
+				t.Errorf("expected status %d, got %d", tt.wantStatus, resp.StatusCode)
+			}
+
+			if tt.wantType != "" {
+				contentType := resp.Header.Get("Content-Type")
+				if contentType != tt.wantType {
+					t.Errorf("expected Content-Type %q, got %q", tt.wantType, contentType)
+				}
+			}
+
+			if tt.wantContains != "" {
+				body, _ := io.ReadAll(resp.Body)
+				if !strings.Contains(string(body), tt.wantContains) {
+					t.Errorf("expected body to contain %q, got %q", tt.wantContains, string(body))
+				}
+			}
+
+			if tt.wantCacheCtrl != "" {
+				cacheCtrl := resp.Header.Get("Cache-Control")
+				if cacheCtrl != tt.wantCacheCtrl {
+					t.Errorf("expected Cache-Control %q, got %q", tt.wantCacheCtrl, cacheCtrl)
+				}
+			}
+		})
+	}
+}
+
+func TestGetContentType(t *testing.T) {
+	tests := []struct {
+		path string
+		want string
+	}{
+		{"index.html", "text/html; charset=utf-8"},
+		{"style.css", "text/css; charset=utf-8"},
+		{"app.js", "application/javascript; charset=utf-8"},
+		{"data.json", "application/json; charset=utf-8"},
+		{"icon.svg", "image/svg+xml"},
+		{"photo.png", "image/png"},
+		{"photo.jpg", "image/jpeg"},
+		{"photo.jpeg", "image/jpeg"},
+		{"animation.gif", "image/gif"},
+		{"favicon.ico", "image/x-icon"},
+		{"font.woff", "font/woff"},
+		{"font.woff2", "font/woff2"},
+		{"font.ttf", "font/ttf"},
+		{"image.webp", "image/webp"},
+		{"unknown.xyz", "application/octet-stream"},
+		{"nested/path/file.html", "text/html; charset=utf-8"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.path, func(t *testing.T) {
+			got := getContentType(tt.path)
+			if got != tt.want {
+				t.Errorf("getContentType(%q) = %q, want %q", tt.path, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestIsImmutableAsset(t *testing.T) {
+	tests := []struct {
+		path string
+		want bool
+	}{
+		// Hashed assets (immutable)
+		{"index-BcD123aF.js", true},
+		{"style-abc456.css", true},
+		{"vendor.def789.js", true},
+
+		// Non-hashed assets (mutable)
+		{"index.html", false},
+		{"style.css", false},
+		{"app.js", false},
+		{"favicon.ico", false},
+
+		// Edge cases
+		{"a.b", false},           // too short
+		{"file.short.js", false}, // 5 chars is too short for hash
+		{"file.abc123.js", true}, // 6 chars is minimum for hash
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.path, func(t *testing.T) {
+			got := isImmutableAsset(tt.path)
+			if got != tt.want {
+				t.Errorf("isImmutableAsset(%q) = %v, want %v", tt.path, got, tt.want)
+			}
+		})
+	}
+}

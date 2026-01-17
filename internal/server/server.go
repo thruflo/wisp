@@ -11,6 +11,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"net"
 	"net/http"
 	"strings"
@@ -20,6 +21,7 @@ import (
 	"github.com/durable-streams/durable-streams/packages/caddy-plugin/store"
 	"github.com/thruflo/wisp/internal/auth"
 	"github.com/thruflo/wisp/internal/config"
+	"github.com/thruflo/wisp/web"
 )
 
 // Server represents the web server for remote access to wisp sessions.
@@ -41,6 +43,9 @@ type Server struct {
 	// Pending user inputs from web client
 	pendingInputs map[string]string // request_id -> response
 
+	// Static assets filesystem
+	assets fs.FS
+
 	// Lifecycle
 	started bool
 }
@@ -49,6 +54,7 @@ type Server struct {
 type Config struct {
 	Port         int
 	PasswordHash string
+	Assets       fs.FS // Optional: static assets filesystem. If nil, uses embedded assets.
 }
 
 // NewServer creates a new Server instance.
@@ -65,11 +71,18 @@ func NewServer(cfg *Config) (*Server, error) {
 		return nil, fmt.Errorf("failed to create stream manager: %w", err)
 	}
 
+	// Use provided assets or default to embedded web assets
+	assets := cfg.Assets
+	if assets == nil {
+		assets = web.GetAssets("")
+	}
+
 	return &Server{
 		port:         cfg.Port,
 		passwordHash: cfg.PasswordHash,
 		tokens:       make(map[string]time.Time),
 		streams:      streams,
+		assets:       assets,
 	}, nil
 }
 
@@ -545,26 +558,175 @@ func (s *Server) GetPendingInput(requestID string) (string, bool) {
 	return response, ok
 }
 
-// handleStatic handles GET / for serving static web assets.
-// For now, returns a simple placeholder. Asset embedding will be done in the next task.
+// handleStatic handles GET requests for serving static web assets.
+// It serves files from the embedded or development assets filesystem.
+// For SPA support, requests for non-existent paths return index.html.
 func (s *Server) handleStatic(w http.ResponseWriter, r *http.Request) {
-	// For now, return a simple HTML page indicating the web client is not yet built
-	if r.URL.Path == "/" || r.URL.Path == "/index.html" {
-		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		w.WriteHeader(http.StatusOK)
-		w.Write([]byte(`<!DOCTYPE html>
-<html>
-<head><title>Wisp</title></head>
-<body>
-<h1>Wisp Remote Access</h1>
-<p>Web client not yet built. This is a placeholder.</p>
-</body>
-</html>`))
+	if r.Method != http.MethodGet && r.Method != http.MethodHead {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
 
-	// Return 404 for other paths
-	http.NotFound(w, r)
+	// Clean the path and remove leading slash
+	path := r.URL.Path
+	if path == "/" {
+		path = "index.html"
+	} else {
+		path = strings.TrimPrefix(path, "/")
+	}
+
+	// Try to open the requested file
+	file, err := s.assets.Open(path)
+	if err != nil {
+		// File not found - for SPA support, serve index.html for HTML requests
+		// This allows client-side routing to work
+		if strings.Contains(r.Header.Get("Accept"), "text/html") || path == "" {
+			s.serveFile(w, r, "index.html")
+			return
+		}
+		http.NotFound(w, r)
+		return
+	}
+	file.Close()
+
+	// Serve the file
+	s.serveFile(w, r, path)
+}
+
+// serveFile serves a file from the assets filesystem.
+func (s *Server) serveFile(w http.ResponseWriter, r *http.Request, path string) {
+	file, err := s.assets.Open(path)
+	if err != nil {
+		http.NotFound(w, r)
+		return
+	}
+	defer file.Close()
+
+	// Get file info for size and modification time
+	stat, err := file.Stat()
+	if err != nil {
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+
+	// Don't serve directories
+	if stat.IsDir() {
+		// Try index.html in the directory
+		indexPath := path + "/index.html"
+		if path == "" || path == "." {
+			indexPath = "index.html"
+		}
+		s.serveFile(w, r, indexPath)
+		return
+	}
+
+	// Set content type based on extension
+	contentType := getContentType(path)
+	w.Header().Set("Content-Type", contentType)
+
+	// Set cache headers for static assets
+	if isImmutableAsset(path) {
+		// Hashed assets can be cached indefinitely
+		w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
+	} else {
+		// HTML and other files should be revalidated
+		w.Header().Set("Cache-Control", "no-cache")
+	}
+
+	// Read and serve the file content
+	content, err := io.ReadAll(file)
+	if err != nil {
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+
+	http.ServeContent(w, r, path, stat.ModTime(), strings.NewReader(string(content)))
+}
+
+// getContentType returns the MIME type for a file based on its extension.
+func getContentType(path string) string {
+	// Common web asset types
+	switch {
+	case strings.HasSuffix(path, ".html"):
+		return "text/html; charset=utf-8"
+	case strings.HasSuffix(path, ".css"):
+		return "text/css; charset=utf-8"
+	case strings.HasSuffix(path, ".js"):
+		return "application/javascript; charset=utf-8"
+	case strings.HasSuffix(path, ".json"):
+		return "application/json; charset=utf-8"
+	case strings.HasSuffix(path, ".svg"):
+		return "image/svg+xml"
+	case strings.HasSuffix(path, ".png"):
+		return "image/png"
+	case strings.HasSuffix(path, ".jpg"), strings.HasSuffix(path, ".jpeg"):
+		return "image/jpeg"
+	case strings.HasSuffix(path, ".gif"):
+		return "image/gif"
+	case strings.HasSuffix(path, ".ico"):
+		return "image/x-icon"
+	case strings.HasSuffix(path, ".woff"):
+		return "font/woff"
+	case strings.HasSuffix(path, ".woff2"):
+		return "font/woff2"
+	case strings.HasSuffix(path, ".ttf"):
+		return "font/ttf"
+	case strings.HasSuffix(path, ".webp"):
+		return "image/webp"
+	default:
+		return "application/octet-stream"
+	}
+}
+
+// isImmutableAsset returns true if the asset path looks like a hashed asset
+// that can be cached indefinitely (e.g., main.abc123.js, index-BcD123.js).
+func isImmutableAsset(path string) bool {
+	// Get the filename without extension
+	// Vite-style: index-BcD123.js (hash after hyphen)
+	// Webpack-style: index.abc123.js (hash as middle segment)
+
+	// Get just the filename
+	lastSlash := strings.LastIndex(path, "/")
+	if lastSlash >= 0 {
+		path = path[lastSlash+1:]
+	}
+
+	// Remove extension
+	dotIdx := strings.LastIndex(path, ".")
+	if dotIdx <= 0 {
+		return false
+	}
+	nameWithoutExt := path[:dotIdx]
+
+	// Check for Vite-style: name-HASH (hyphen separator)
+	hyphenIdx := strings.LastIndex(nameWithoutExt, "-")
+	if hyphenIdx > 0 {
+		hash := nameWithoutExt[hyphenIdx+1:]
+		if len(hash) >= 6 && len(hash) <= 16 && isAlphanumeric(hash) {
+			return true
+		}
+	}
+
+	// Check for Webpack-style: name.HASH (dot separator with 3+ parts)
+	parts := strings.Split(nameWithoutExt, ".")
+	if len(parts) >= 2 {
+		hash := parts[len(parts)-1]
+		if len(hash) >= 6 && len(hash) <= 16 && isAlphanumeric(hash) {
+			return true
+		}
+	}
+
+	return false
+}
+
+// isAlphanumeric returns true if the string contains only alphanumeric characters.
+func isAlphanumeric(s string) bool {
+	for _, r := range s {
+		if !((r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9')) {
+			return false
+		}
+	}
+	return len(s) > 0
 }
 
 // handleAuth handles POST /auth for password authentication.
