@@ -415,43 +415,31 @@ func TestBuildClaudeArgs(t *testing.T) {
 				MaxBudgetUSD: 15.50,
 			},
 		},
-		repoPath:  "/home/sprite/org/repo",
-		wispPath:  "/home/sprite/org/repo/.wisp",
+		repoPath:  "/var/local/wisp/repos/org/repo",
 		claudeCfg: DefaultClaudeConfig(),
 	}
 
 	args := loop.buildClaudeArgs()
 
-	// Check required flags
-	assert.Contains(t, args, "claude")
-	assert.Contains(t, args, "--dangerously-skip-permissions")
-	assert.Contains(t, args, "--verbose") // required when using -p with --output-format stream-json
-	assert.Contains(t, args, "--output-format")
-	assert.Contains(t, args, "stream-json")
-	assert.Contains(t, args, "--max-turns")
-	assert.Contains(t, args, "100")
+	// args should be ["bash", "-c", "export HOME=... && claude ..."]
+	require.Len(t, args, 3)
+	assert.Equal(t, "bash", args[0])
+	assert.Equal(t, "-c", args[1])
+
+	// Check the bash command string contains expected flags
+	bashCmd := args[2]
+	assert.Contains(t, bashCmd, "claude")
+	assert.Contains(t, bashCmd, "--dangerously-skip-permissions")
+	assert.Contains(t, bashCmd, "--verbose") // required when using -p with --output-format stream-json
+	assert.Contains(t, bashCmd, "--output-format stream-json")
+	assert.Contains(t, bashCmd, "--max-turns 100")
 
 	// Check budget flag from config.Limits (since ClaudeConfig.MaxBudget is 0)
-	assert.Contains(t, args, "--max-budget-usd")
-	assert.Contains(t, args, "15.50")
+	assert.Contains(t, bashCmd, "--max-budget-usd 15.50")
 
-	// Check prompt file references
-	var foundIteratePrompt bool
-	var foundContextFile bool
-	for i, arg := range args {
-		if arg == "-p" && i+1 < len(args) {
-			if args[i+1] == "$(cat /home/sprite/org/repo/.wisp/iterate.md)" {
-				foundIteratePrompt = true
-			}
-		}
-		if arg == "--append-system-prompt-file" && i+1 < len(args) {
-			if args[i+1] == "/home/sprite/org/repo/.wisp/context.md" {
-				foundContextFile = true
-			}
-		}
-	}
-	assert.True(t, foundIteratePrompt, "should include iterate.md prompt")
-	assert.True(t, foundContextFile, "should include context.md")
+	// Check prompt file references use absolute paths
+	assert.Contains(t, bashCmd, "$(cat /var/local/wisp/templates/iterate.md)")
+	assert.Contains(t, bashCmd, "--append-system-prompt-file /var/local/wisp/templates/context.md")
 }
 
 // TestBuildClaudeArgsNoBudget tests args without budget limit.
@@ -462,17 +450,16 @@ func TestBuildClaudeArgsNoBudget(t *testing.T) {
 				MaxBudgetUSD: 0, // No budget limit
 			},
 		},
-		repoPath:  "/home/sprite/org/repo",
-		wispPath:  "/home/sprite/org/repo/.wisp",
+		repoPath:  "/var/local/wisp/repos/org/repo",
 		claudeCfg: DefaultClaudeConfig(),
 	}
 
 	args := loop.buildClaudeArgs()
 
-	// Should not contain budget flag
-	for _, arg := range args {
-		assert.NotEqual(t, "--max-budget-usd", arg)
-	}
+	// Should not contain budget flag in the bash command
+	require.Len(t, args, 3)
+	bashCmd := args[2]
+	assert.NotContains(t, bashCmd, "--max-budget-usd")
 }
 
 // TestBuildClaudeArgsWithCustomClaudeConfig tests buildClaudeArgs with custom ClaudeConfig.
@@ -480,8 +467,7 @@ func TestBuildClaudeArgsWithCustomClaudeConfig(t *testing.T) {
 	t.Run("custom max turns", func(t *testing.T) {
 		loop := &Loop{
 			cfg:      &config.Config{},
-			repoPath: "/home/sprite/org/repo",
-			wispPath: "/home/sprite/org/repo/.wisp",
+			repoPath: "/var/local/wisp/repos/org/repo",
 			claudeCfg: ClaudeConfig{
 				MaxTurns:     20,
 				Verbose:      true,
@@ -491,9 +477,10 @@ func TestBuildClaudeArgsWithCustomClaudeConfig(t *testing.T) {
 
 		args := loop.buildClaudeArgs()
 
-		assert.Contains(t, args, "--max-turns")
-		assert.Contains(t, args, "20")
-		assert.NotContains(t, args, "100")
+		require.Len(t, args, 3)
+		bashCmd := args[2]
+		assert.Contains(t, bashCmd, "--max-turns 20")
+		assert.NotContains(t, bashCmd, "--max-turns 100")
 	})
 
 	t.Run("custom budget from ClaudeConfig overrides config.Limits", func(t *testing.T) {
@@ -503,8 +490,7 @@ func TestBuildClaudeArgsWithCustomClaudeConfig(t *testing.T) {
 					MaxBudgetUSD: 50.0, // This should be ignored
 				},
 			},
-			repoPath: "/home/sprite/org/repo",
-			wispPath: "/home/sprite/org/repo/.wisp",
+			repoPath: "/var/local/wisp/repos/org/repo",
 			claudeCfg: ClaudeConfig{
 				MaxTurns:     100,
 				MaxBudget:    5.0, // ClaudeConfig budget takes precedence
@@ -515,16 +501,16 @@ func TestBuildClaudeArgsWithCustomClaudeConfig(t *testing.T) {
 
 		args := loop.buildClaudeArgs()
 
-		assert.Contains(t, args, "--max-budget-usd")
-		assert.Contains(t, args, "5.00")
-		assert.NotContains(t, args, "50.00")
+		require.Len(t, args, 3)
+		bashCmd := args[2]
+		assert.Contains(t, bashCmd, "--max-budget-usd 5.00")
+		assert.NotContains(t, bashCmd, "50.00")
 	})
 
 	t.Run("verbose disabled", func(t *testing.T) {
 		loop := &Loop{
 			cfg:      &config.Config{},
-			repoPath: "/home/sprite/org/repo",
-			wispPath: "/home/sprite/org/repo/.wisp",
+			repoPath: "/var/local/wisp/repos/org/repo",
 			claudeCfg: ClaudeConfig{
 				MaxTurns:     100,
 				Verbose:      false,
@@ -534,14 +520,15 @@ func TestBuildClaudeArgsWithCustomClaudeConfig(t *testing.T) {
 
 		args := loop.buildClaudeArgs()
 
-		assert.NotContains(t, args, "--verbose")
+		require.Len(t, args, 3)
+		bashCmd := args[2]
+		assert.NotContains(t, bashCmd, "--verbose")
 	})
 
 	t.Run("custom output format", func(t *testing.T) {
 		loop := &Loop{
 			cfg:      &config.Config{},
-			repoPath: "/home/sprite/org/repo",
-			wispPath: "/home/sprite/org/repo/.wisp",
+			repoPath: "/var/local/wisp/repos/org/repo",
 			claudeCfg: ClaudeConfig{
 				MaxTurns:     100,
 				Verbose:      true,
@@ -551,16 +538,16 @@ func TestBuildClaudeArgsWithCustomClaudeConfig(t *testing.T) {
 
 		args := loop.buildClaudeArgs()
 
-		assert.Contains(t, args, "--output-format")
-		assert.Contains(t, args, "text")
-		assert.NotContains(t, args, "stream-json")
+		require.Len(t, args, 3)
+		bashCmd := args[2]
+		assert.Contains(t, bashCmd, "--output-format text")
+		assert.NotContains(t, bashCmd, "stream-json")
 	})
 
 	t.Run("zero max turns omits flag", func(t *testing.T) {
 		loop := &Loop{
 			cfg:      &config.Config{},
-			repoPath: "/home/sprite/org/repo",
-			wispPath: "/home/sprite/org/repo/.wisp",
+			repoPath: "/var/local/wisp/repos/org/repo",
 			claudeCfg: ClaudeConfig{
 				MaxTurns:     0, // Zero means no limit
 				Verbose:      true,
@@ -570,14 +557,15 @@ func TestBuildClaudeArgsWithCustomClaudeConfig(t *testing.T) {
 
 		args := loop.buildClaudeArgs()
 
-		assert.NotContains(t, args, "--max-turns")
+		require.Len(t, args, 3)
+		bashCmd := args[2]
+		assert.NotContains(t, bashCmd, "--max-turns")
 	})
 
 	t.Run("empty output format omits flag", func(t *testing.T) {
 		loop := &Loop{
 			cfg:      &config.Config{},
-			repoPath: "/home/sprite/org/repo",
-			wispPath: "/home/sprite/org/repo/.wisp",
+			repoPath: "/var/local/wisp/repos/org/repo",
 			claudeCfg: ClaudeConfig{
 				MaxTurns:     100,
 				Verbose:      true,
@@ -587,7 +575,9 @@ func TestBuildClaudeArgsWithCustomClaudeConfig(t *testing.T) {
 
 		args := loop.buildClaudeArgs()
 
-		assert.NotContains(t, args, "--output-format")
+		require.Len(t, args, 3)
+		bashCmd := args[2]
+		assert.NotContains(t, bashCmd, "--output-format")
 	})
 }
 
@@ -741,7 +731,7 @@ func TestLoopRunMaxIterations(t *testing.T) {
 
 	// Set up state.json that Claude would write
 	stateData, _ := json.Marshal(&state.State{Status: state.StatusContinue, Summary: "Working"})
-	mockClient.SetFile("/home/sprite/org/repo/.wisp/state.json", stateData)
+	mockClient.SetFile("/var/local/wisp/session/state.json", stateData)
 
 	syncMgr := state.NewSyncManager(mockClient, store)
 
@@ -762,7 +752,7 @@ func TestLoopRunMaxIterations(t *testing.T) {
 		cfg,
 		session,
 		mockTUI,
-		"/home/sprite/org/repo",
+		"/var/local/wisp/repos/org/repo",
 		"",
 	)
 
@@ -838,16 +828,16 @@ func TestNeedsInputFlow(t *testing.T) {
 	require.NoError(t, store.SaveTasks(branch, tasks))
 
 	mockClient := NewMockSpriteClient()
-	repoPath := "/home/sprite/org/repo"
+	repoPath := "/var/local/wisp/repos/org/repo"
 
-	// Set up NEEDS_INPUT state that Claude would write
+	// Set up NEEDS_INPUT state that Claude would write (using new absolute paths)
 	needsInputState := &state.State{
 		Status:   state.StatusNeedsInput,
 		Summary:  "Need clarification on implementation",
 		Question: "Should we use Redis or in-memory cache?",
 	}
 	needsInputData, _ := json.Marshal(needsInputState)
-	mockClient.SetFile(repoPath+"/.wisp/state.json", needsInputData)
+	mockClient.SetFile("/var/local/wisp/session/state.json", needsInputData)
 
 	syncMgr := state.NewSyncManager(mockClient, store)
 
@@ -888,11 +878,11 @@ func TestNeedsInputFlow(t *testing.T) {
 
 		// We can't easily test the full async flow, so test the sync part:
 		// Write response directly and verify it was written
-		err := syncMgr.WriteResponseToSprite(ctx, session.SpriteName, repoPath, "Use Redis for distributed caching")
+		err := syncMgr.WriteResponseToSprite(ctx, session.SpriteName, "Use Redis for distributed caching")
 		require.NoError(t, err)
 
 		// Verify response.json was written to Sprite
-		responseData, err := mockClient.ReadFile(ctx, session.SpriteName, repoPath+"/.wisp/response.json")
+		responseData, err := mockClient.ReadFile(ctx, session.SpriteName, "/var/local/wisp/session/response.json")
 		require.NoError(t, err)
 
 		var response state.Response
@@ -1049,15 +1039,15 @@ func TestNewLoopWithOptions(t *testing.T) {
 			Config:      cfg,
 			Session:     session,
 			TUI:         mockTUI,
-			RepoPath:    "/home/sprite/test-org/test-repo",
+			RepoPath:    "/var/local/wisp/repos/test-org/test-repo",
 			TemplateDir: "/path/to/templates",
 		}
 
 		loop := NewLoopWithOptions(opts)
 
 		assert.NotNil(t, loop)
-		assert.Equal(t, "/home/sprite/test-org/test-repo", loop.repoPath)
-		assert.Equal(t, "/home/sprite/test-org/test-repo/.wisp", loop.wispPath)
+		assert.Equal(t, "/var/local/wisp/repos/test-org/test-repo", loop.repoPath)
+		assert.Equal(t, "/var/local/wisp/repos/test-org/test-repo/.wisp", loop.wispPath)
 		assert.Equal(t, "/path/to/templates", loop.templateDir)
 	})
 
@@ -1071,7 +1061,7 @@ func TestNewLoopWithOptions(t *testing.T) {
 			Config:      cfg,
 			Session:     session,
 			TUI:         mockTUI,
-			RepoPath:    "/home/sprite/test-org/test-repo",
+			RepoPath:    "/var/local/wisp/repos/test-org/test-repo",
 			StartTime:   injectedTime,
 		}
 
@@ -1088,7 +1078,7 @@ func TestNewLoopWithOptions(t *testing.T) {
 			Config:      cfg,
 			Session:     session,
 			TUI:         mockTUI,
-			RepoPath:    "/home/sprite/test-org/test-repo",
+			RepoPath:    "/var/local/wisp/repos/test-org/test-repo",
 			// StartTime not set (zero value)
 		}
 
@@ -1104,7 +1094,7 @@ func TestNewLoopWithOptions(t *testing.T) {
 			Config:      cfg,
 			Session:     session,
 			TUI:         mockTUI,
-			RepoPath:    "/home/sprite/test-org/test-repo",
+			RepoPath:    "/var/local/wisp/repos/test-org/test-repo",
 			// ClaudeConfig not set (zero value)
 		}
 
@@ -1131,7 +1121,7 @@ func TestNewLoopWithOptions(t *testing.T) {
 			Config:       cfg,
 			Session:      session,
 			TUI:          mockTUI,
-			RepoPath:     "/home/sprite/test-org/test-repo",
+			RepoPath:     "/var/local/wisp/repos/test-org/test-repo",
 			ClaudeConfig: customCfg,
 		}
 
@@ -1170,13 +1160,13 @@ func TestNewLoopUsesOptions(t *testing.T) {
 		cfg,
 		session,
 		mockTUI,
-		"/home/sprite/org/repo",
+		"/var/local/wisp/repos/org/repo",
 		"/templates",
 	)
 
 	assert.NotNil(t, loop)
-	assert.Equal(t, "/home/sprite/org/repo", loop.repoPath)
-	assert.Equal(t, "/home/sprite/org/repo/.wisp", loop.wispPath)
+	assert.Equal(t, "/var/local/wisp/repos/org/repo", loop.repoPath)
+	assert.Equal(t, "/var/local/wisp/repos/org/repo/.wisp", loop.wispPath)
 	assert.Equal(t, "/templates", loop.templateDir)
 	// StartTime should be zero when using NewLoop (not injected)
 	assert.True(t, loop.startTime.IsZero())
@@ -1205,7 +1195,7 @@ func TestLoopRunWithInjectedStartTime(t *testing.T) {
 
 	mockClient := NewMockSpriteClient()
 	stateData, _ := json.Marshal(&state.State{Status: state.StatusContinue, Summary: "Working"})
-	mockClient.SetFile("/home/sprite/org/repo/.wisp/state.json", stateData)
+	mockClient.SetFile("/var/local/wisp/session/state.json", stateData)
 
 	syncMgr := state.NewSyncManager(mockClient, store)
 	mockTUI := tui.NewTUI(io.Discard)
@@ -1230,7 +1220,7 @@ func TestLoopRunWithInjectedStartTime(t *testing.T) {
 			Config:      cfg,
 			Session:     session,
 			TUI:         mockTUI,
-			RepoPath:    "/home/sprite/org/repo",
+			RepoPath:    "/var/local/wisp/repos/org/repo",
 			StartTime:   pastTime,
 		})
 
@@ -1252,7 +1242,7 @@ func TestLoopRunWithInjectedStartTime(t *testing.T) {
 			Config:      cfg,
 			Session:     session,
 			TUI:         mockTUI,
-			RepoPath:    "/home/sprite/org/repo",
+			RepoPath:    "/var/local/wisp/repos/org/repo",
 			StartTime:   recentTime,
 		})
 

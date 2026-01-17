@@ -334,40 +334,42 @@ func (l *Loop) runIteration(ctx context.Context) (*state.State, error) {
 }
 
 // buildClaudeArgs constructs the Claude command line arguments.
+// Returns args suitable for client.Execute, wrapped in bash with proper HOME for credentials.
 func (l *Loop) buildClaudeArgs() []string {
-	iteratePath := filepath.Join(l.wispPath, "iterate.md")
-	contextPath := filepath.Join(l.wispPath, "context.md")
+	iteratePath := filepath.Join(sprite.TemplatesDir, "iterate.md")
+	contextPath := filepath.Join(sprite.TemplatesDir, "context.md")
 
-	args := []string{
+	claudeArgs := []string{
 		"claude",
-		"-p", fmt.Sprintf("$(cat %s)", iteratePath),
+		"-p", fmt.Sprintf("\"$(cat %s)\"", iteratePath),
 		"--append-system-prompt-file", contextPath,
 		"--dangerously-skip-permissions",
 	}
 
 	// Add verbose flag if configured (required when using -p with --output-format stream-json)
 	if l.claudeCfg.Verbose {
-		args = append(args, "--verbose")
+		claudeArgs = append(claudeArgs, "--verbose")
 	}
 
 	// Add output format
 	if l.claudeCfg.OutputFormat != "" {
-		args = append(args, "--output-format", l.claudeCfg.OutputFormat)
+		claudeArgs = append(claudeArgs, "--output-format", l.claudeCfg.OutputFormat)
 	}
 
 	// Add max turns
 	if l.claudeCfg.MaxTurns > 0 {
-		args = append(args, "--max-turns", fmt.Sprintf("%d", l.claudeCfg.MaxTurns))
+		claudeArgs = append(claudeArgs, "--max-turns", fmt.Sprintf("%d", l.claudeCfg.MaxTurns))
 	}
 
 	// Add budget limit from ClaudeConfig if set, otherwise fall back to config.Limits
 	if l.claudeCfg.MaxBudget > 0 {
-		args = append(args, "--max-budget-usd", fmt.Sprintf("%.2f", l.claudeCfg.MaxBudget))
+		claudeArgs = append(claudeArgs, "--max-budget-usd", fmt.Sprintf("%.2f", l.claudeCfg.MaxBudget))
 	} else if l.cfg.Limits.MaxBudgetUSD > 0 {
-		args = append(args, "--max-budget-usd", fmt.Sprintf("%.2f", l.cfg.Limits.MaxBudgetUSD))
+		claudeArgs = append(claudeArgs, "--max-budget-usd", fmt.Sprintf("%.2f", l.cfg.Limits.MaxBudgetUSD))
 	}
 
-	return args
+	// Wrap in bash with proper HOME for credentials
+	return sprite.ClaudeCommand(claudeArgs)
 }
 
 // streamOutput reads from a reader and sends lines to the TUI.
@@ -454,7 +456,7 @@ func (l *Loop) parseStreamJSON(line string) string {
 
 // readStateFromSprite reads state.json from the Sprite.
 func (l *Loop) readStateFromSprite(ctx context.Context) (*state.State, error) {
-	statePath := filepath.Join(l.wispPath, "state.json")
+	statePath := filepath.Join(sprite.SessionDir, "state.json")
 	data, err := l.client.ReadFile(ctx, l.session.SpriteName, statePath)
 	if err != nil {
 		return nil, fmt.Errorf("failed to read state.json: %w", err)
@@ -509,7 +511,7 @@ func (l *Loop) handleNeedsInput(ctx context.Context, st *state.State) Result {
 			switch action.Action {
 			case tui.ActionSubmitInput:
 				// Write response to Sprite
-				if err := l.sync.WriteResponseToSprite(ctx, l.session.SpriteName, l.repoPath, action.Input); err != nil {
+				if err := l.sync.WriteResponseToSprite(ctx, l.session.SpriteName, action.Input); err != nil {
 					return Result{
 						Reason:     ExitReasonCrash,
 						Iterations: l.iteration,
