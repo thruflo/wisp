@@ -70,6 +70,14 @@ func (m *mockSpriteClient) Execute(ctx context.Context, name string, dir string,
 	}, nil
 }
 
+func (m *mockSpriteClient) ExecuteOutput(ctx context.Context, name string, dir string, env []string, args ...string) (stdout, stderr []byte, exitCode int, err error) {
+	m.executeCalls = append(m.executeCalls, executeCall{name: name, dir: dir, env: env, args: args})
+	if m.executeErr != nil {
+		return nil, nil, -1, m.executeErr
+	}
+	return nil, nil, 0, nil
+}
+
 func (m *mockSpriteClient) WriteFile(ctx context.Context, name string, path string, content []byte) error {
 	m.writeCalls = append(m.writeCalls, writeCall{name: name, path: path, content: content})
 	return m.writeErr

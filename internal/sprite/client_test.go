@@ -93,6 +93,14 @@ func (m *MockClient) Execute(ctx context.Context, name string, dir string, env [
 	}, nil
 }
 
+func (m *MockClient) ExecuteOutput(ctx context.Context, name string, dir string, env []string, args ...string) (stdout, stderr []byte, exitCode int, err error) {
+	m.ExecuteCalls = append(m.ExecuteCalls, ExecuteCall{Name: name, Dir: dir, Env: env, Args: args})
+	if m.ExecuteErr != nil {
+		return nil, nil, -1, m.ExecuteErr
+	}
+	return m.ExecuteStdout, m.ExecuteStderr, 0, nil
+}
+
 func (m *MockClient) WriteFile(ctx context.Context, name string, path string, content []byte) error {
 	m.WriteCalls = append(m.WriteCalls, WriteCall{Name: name, Path: path, Content: content})
 	return m.WriteErr
