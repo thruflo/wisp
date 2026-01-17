@@ -141,7 +141,7 @@ func TestSyncManager_SyncToSprite(t *testing.T) {
 
 	// Sync to sprite
 	ctx := context.Background()
-	err := syncManager.SyncToSprite(ctx, "wisp-abc", "wisp/feature", "/home/sprite/repo")
+	err := syncManager.SyncToSprite(ctx, "wisp-abc", "wisp/feature")
 	require.NoError(t, err)
 
 	// Verify writes
@@ -200,7 +200,7 @@ func TestSyncManager_SyncToSprite_NoFiles(t *testing.T) {
 
 	// Sync to sprite - should not fail, just skip files
 	ctx := context.Background()
-	err := syncManager.SyncToSprite(ctx, "wisp-abc", "wisp/feature", "/home/sprite/repo")
+	err := syncManager.SyncToSprite(ctx, "wisp-abc", "wisp/feature")
 	require.NoError(t, err)
 
 	// No writes should have occurred
@@ -233,7 +233,7 @@ func TestSyncManager_SyncFromSprite(t *testing.T) {
 
 	// Sync from sprite
 	ctx := context.Background()
-	err := syncManager.SyncFromSprite(ctx, "wisp-abc", "wisp/feature", "/home/sprite/repo")
+	err := syncManager.SyncFromSprite(ctx, "wisp-abc", "wisp/feature")
 	require.NoError(t, err)
 
 	// Verify reads
@@ -283,7 +283,7 @@ func TestSyncManager_SyncFromSprite_MissingFiles(t *testing.T) {
 
 	// Sync from sprite - should not fail
 	ctx := context.Background()
-	err := syncManager.SyncFromSprite(ctx, "wisp-abc", "wisp/feature", "/home/sprite/repo")
+	err := syncManager.SyncFromSprite(ctx, "wisp-abc", "wisp/feature")
 	require.NoError(t, err)
 
 	// No local files should have been created
@@ -416,7 +416,7 @@ func TestSyncManager_SyncToSprite_WriteError(t *testing.T) {
 	require.NoError(t, store.SaveState("wisp/feature", &State{Status: StatusContinue}))
 
 	ctx := context.Background()
-	err := syncManager.SyncToSprite(ctx, "wisp-abc", "wisp/feature", "/home/sprite/repo")
+	err := syncManager.SyncToSprite(ctx, "wisp-abc", "wisp/feature")
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "disk full")
 }
@@ -444,7 +444,7 @@ func TestSyncManager_SyncFromSprite_ParseError(t *testing.T) {
 	mockClient.readResponses["/var/local/wisp/session/state.json"] = []byte(`{invalid json}`)
 
 	ctx := context.Background()
-	err := syncManager.SyncFromSprite(ctx, "wisp-abc", "wisp/feature", "/home/sprite/repo")
+	err := syncManager.SyncFromSprite(ctx, "wisp-abc", "wisp/feature")
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "failed to parse state")
 }

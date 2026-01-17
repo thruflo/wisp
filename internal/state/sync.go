@@ -27,7 +27,7 @@ func NewSyncManager(client sprite.Client, store *Store) *SyncManager {
 
 // SyncToSprite copies state.json, tasks.json, history.json from local to Sprite.
 // Files are written to /var/local/wisp/session/ on the Sprite.
-func (m *SyncManager) SyncToSprite(ctx context.Context, spriteName, branch, repoPath string) error {
+func (m *SyncManager) SyncToSprite(ctx context.Context, spriteName, branch string) error {
 	// Sync state.json
 	state, err := m.store.LoadState(branch)
 	if err != nil {
@@ -81,7 +81,7 @@ func (m *SyncManager) SyncToSprite(ctx context.Context, spriteName, branch, repo
 
 // SyncFromSprite copies state.json, tasks.json, history.json from Sprite to local.
 // Files are read from /var/local/wisp/session/ on the Sprite.
-func (m *SyncManager) SyncFromSprite(ctx context.Context, spriteName, branch, repoPath string) error {
+func (m *SyncManager) SyncFromSprite(ctx context.Context, spriteName, branch string) error {
 	// Sync state.json
 	statePath := filepath.Join(sprite.SessionDir, "state.json")
 	stateData, err := m.client.ReadFile(ctx, spriteName, statePath)
