@@ -467,7 +467,7 @@ func TestBuildClaudeArgs(t *testing.T) {
 	assert.Contains(t, bashCmd, "--dangerously-skip-permissions")
 	assert.Contains(t, bashCmd, "--verbose") // required when using -p with --output-format stream-json
 	assert.Contains(t, bashCmd, "--output-format stream-json")
-	assert.Contains(t, bashCmd, "--max-turns 100")
+	assert.Contains(t, bashCmd, "--max-turns 200")
 
 	// Check budget flag from config.Limits (since ClaudeConfig.MaxBudget is 0)
 	assert.Contains(t, bashCmd, "--max-budget-usd 15.50")
