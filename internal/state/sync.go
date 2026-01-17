@@ -126,23 +126,15 @@ func (m *SyncManager) SyncFromSprite(ctx context.Context, spriteName, branch, re
 
 // CopySettingsToSprite copies settings.json to /var/local/wisp/.claude/settings.json on the Sprite.
 // Uses /var/local/wisp due to permission issues with /home/sprite.
+// Note: The .claude directory is created by EnsureDirectoriesOnSprite, so we don't create it here.
 func (m *SyncManager) CopySettingsToSprite(ctx context.Context, spriteName string, settings *config.Settings) error {
 	data, err := json.MarshalIndent(settings, "", "  ")
 	if err != nil {
 		return fmt.Errorf("failed to marshal settings: %w", err)
 	}
 
-	// Write to Claude Code's settings location in /var/local/wisp
-	settingsPath := "/var/local/wisp/.claude/settings.json"
-
-	// Ensure .claude directory exists
-	_, _, exitCode, err := m.client.ExecuteOutput(ctx, spriteName, "", nil, "mkdir", "-p", filepath.Dir(settingsPath))
-	if err != nil {
-		return fmt.Errorf("failed to create .claude directory: %w", err)
-	}
-	if exitCode != 0 {
-		return fmt.Errorf("mkdir .claude failed with exit code %d", exitCode)
-	}
+	// Write to Claude Code's settings location
+	settingsPath := filepath.Join(sprite.ClaudeDir, "settings.json")
 
 	if err := m.client.WriteFile(ctx, spriteName, settingsPath, data); err != nil {
 		return fmt.Errorf("failed to write settings to sprite: %w", err)
@@ -201,11 +193,11 @@ func (m *SyncManager) WriteResponseToSprite(ctx context.Context, spriteName, ans
 	return nil
 }
 
-// EnsureDirectoriesOnSprite creates the session, templates, and repos directories on the Sprite.
+// EnsureDirectoriesOnSprite creates the session, templates, repos, and .claude directories on the Sprite.
 func (m *SyncManager) EnsureDirectoriesOnSprite(ctx context.Context, spriteName string) error {
-	dirs := []string{sprite.SessionDir, sprite.TemplatesDir, sprite.ReposDir}
+	dirs := []string{sprite.SessionDir, sprite.TemplatesDir, sprite.ReposDir, sprite.ClaudeDir}
 	for _, dir := range dirs {
-		_, _, exitCode, err := m.client.ExecuteOutput(ctx, spriteName, "", nil, "mkdir", "-p", dir)
+		_, _, exitCode, err := m.client.ExecuteOutputWithRetry(ctx, spriteName, "", nil, "mkdir", "-p", dir)
 		if err != nil {
 			return fmt.Errorf("failed to create directory %s: %w", dir, err)
 		}

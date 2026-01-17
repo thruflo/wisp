@@ -78,6 +78,10 @@ func (m *mockSpriteClient) ExecuteOutput(ctx context.Context, name string, dir s
 	return nil, nil, 0, nil
 }
 
+func (m *mockSpriteClient) ExecuteOutputWithRetry(ctx context.Context, name string, dir string, env []string, args ...string) (stdout, stderr []byte, exitCode int, err error) {
+	return m.ExecuteOutput(ctx, name, dir, env, args...)
+}
+
 func (m *mockSpriteClient) WriteFile(ctx context.Context, name string, path string, content []byte) error {
 	m.writeCalls = append(m.writeCalls, writeCall{name: name, path: path, content: content})
 	return m.writeErr
@@ -312,11 +316,8 @@ func TestSyncManager_CopySettingsToSprite(t *testing.T) {
 	err := syncManager.CopySettingsToSprite(ctx, "wisp-abc", settings)
 	require.NoError(t, err)
 
-	// Should have executed mkdir and written file
-	require.Len(t, mockClient.executeCalls, 1)
-	assert.Contains(t, mockClient.executeCalls[0].args, "mkdir")
-	assert.Contains(t, mockClient.executeCalls[0].args, "-p")
-	assert.Contains(t, mockClient.executeCalls[0].args, "/var/local/wisp/.claude")
+	// Should only write file (mkdir no longer needed, handled by EnsureDirectoriesOnSprite)
+	require.Len(t, mockClient.executeCalls, 0)
 
 	require.Len(t, mockClient.writeCalls, 1)
 	assert.Equal(t, "/var/local/wisp/.claude/settings.json", mockClient.writeCalls[0].path)
@@ -389,8 +390,8 @@ func TestSyncManager_EnsureDirectoriesOnSprite(t *testing.T) {
 	err := syncManager.EnsureDirectoriesOnSprite(ctx, "wisp-abc")
 	require.NoError(t, err)
 
-	// Should have created 3 directories: session, templates, repos
-	require.Len(t, mockClient.executeCalls, 3)
+	// Should have created 4 directories: session, templates, repos, .claude
+	require.Len(t, mockClient.executeCalls, 4)
 }
 
 func TestSyncManager_SyncToSprite_WriteError(t *testing.T) {
