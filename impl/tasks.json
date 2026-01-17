@@ -173,7 +173,7 @@
       "Add unit test for headless flag parsing",
       "Add integration test for headless execution"
     ],
-    "passes": false
+    "passes": true
   },
   {
     "category": "test",
