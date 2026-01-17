@@ -70,6 +70,26 @@ type Result struct {
 	Error      error
 }
 
+// ClaudeConfig holds configuration for Claude command execution.
+// This allows tests to override production defaults and ensures
+// consistent command building across the codebase.
+type ClaudeConfig struct {
+	MaxTurns     int     // Maximum number of Claude turns per iteration
+	MaxBudget    float64 // Maximum budget in USD (0 for no limit)
+	Verbose      bool    // Enable verbose output (required for stream-json with -p)
+	OutputFormat string  // Output format (e.g., "stream-json")
+}
+
+// DefaultClaudeConfig returns production defaults for Claude execution.
+func DefaultClaudeConfig() ClaudeConfig {
+	return ClaudeConfig{
+		MaxTurns:     100,
+		MaxBudget:    0, // No limit by default; use config.Limits.MaxBudgetUSD for session budget
+		Verbose:      true,
+		OutputFormat: "stream-json",
+	}
+}
+
 // Loop manages the Claude Code iteration loop.
 type Loop struct {
 	client      sprite.Client
@@ -82,21 +102,23 @@ type Loop struct {
 	wispPath    string // Path on Sprite: <repoPath>/.wisp
 	iteration   int
 	startTime   time.Time
-	templateDir string // Local path to templates
+	templateDir string       // Local path to templates
+	claudeCfg   ClaudeConfig // Claude command configuration
 }
 
 // LoopOptions holds configuration for creating a Loop instance.
 // This struct enables test-friendly construction with explicit dependencies.
 type LoopOptions struct {
-	Client      sprite.Client
-	SyncManager *state.SyncManager
-	Store       *state.Store
-	Config      *config.Config
-	Session     *config.Session
-	TUI         *tui.TUI
-	RepoPath    string
-	TemplateDir string
-	StartTime   time.Time // Optional: for deterministic time-based testing
+	Client       sprite.Client
+	SyncManager  *state.SyncManager
+	Store        *state.Store
+	Config       *config.Config
+	Session      *config.Session
+	TUI          *tui.TUI
+	RepoPath     string
+	TemplateDir  string
+	StartTime    time.Time    // Optional: for deterministic time-based testing
+	ClaudeConfig ClaudeConfig // Optional: Claude command config (defaults used if zero)
 }
 
 // NewLoop creates a new Loop instance.
@@ -124,7 +146,13 @@ func NewLoop(
 
 // NewLoopWithOptions creates a Loop with explicit options.
 // This allows tests to inject dependencies and control behavior.
+// If ClaudeConfig is zero-valued, production defaults are used.
 func NewLoopWithOptions(opts LoopOptions) *Loop {
+	claudeCfg := opts.ClaudeConfig
+	if claudeCfg == (ClaudeConfig{}) {
+		claudeCfg = DefaultClaudeConfig()
+	}
+
 	return &Loop{
 		client:      opts.Client,
 		sync:        opts.SyncManager,
@@ -136,6 +164,7 @@ func NewLoopWithOptions(opts LoopOptions) *Loop {
 		wispPath:    filepath.Join(opts.RepoPath, ".wisp"),
 		templateDir: opts.TemplateDir,
 		startTime:   opts.StartTime,
+		claudeCfg:   claudeCfg,
 	}
 }
 
@@ -309,19 +338,32 @@ func (l *Loop) buildClaudeArgs() []string {
 	iteratePath := filepath.Join(l.wispPath, "iterate.md")
 	contextPath := filepath.Join(l.wispPath, "context.md")
 
-	// Note: --verbose is required when using -p with --output-format stream-json
 	args := []string{
 		"claude",
 		"-p", fmt.Sprintf("$(cat %s)", iteratePath),
 		"--append-system-prompt-file", contextPath,
 		"--dangerously-skip-permissions",
-		"--verbose",
-		"--output-format", "stream-json",
-		"--max-turns", "100",
 	}
 
-	// Add budget limit if configured
-	if l.cfg.Limits.MaxBudgetUSD > 0 {
+	// Add verbose flag if configured (required when using -p with --output-format stream-json)
+	if l.claudeCfg.Verbose {
+		args = append(args, "--verbose")
+	}
+
+	// Add output format
+	if l.claudeCfg.OutputFormat != "" {
+		args = append(args, "--output-format", l.claudeCfg.OutputFormat)
+	}
+
+	// Add max turns
+	if l.claudeCfg.MaxTurns > 0 {
+		args = append(args, "--max-turns", fmt.Sprintf("%d", l.claudeCfg.MaxTurns))
+	}
+
+	// Add budget limit from ClaudeConfig if set, otherwise fall back to config.Limits
+	if l.claudeCfg.MaxBudget > 0 {
+		args = append(args, "--max-budget-usd", fmt.Sprintf("%.2f", l.claudeCfg.MaxBudget))
+	} else if l.cfg.Limits.MaxBudgetUSD > 0 {
 		args = append(args, "--max-budget-usd", fmt.Sprintf("%.2f", l.cfg.Limits.MaxBudgetUSD))
 	}
 

@@ -35,7 +35,7 @@
       "Update real_sprites_integration_test.go to use testutil helpers",
       "Run integration tests to verify no regressions"
     ],
-    "passes": false
+    "passes": true
   },
   {
     "category": "refactor",
@@ -49,7 +49,7 @@
       "Update all internal callers to use new exported names",
       "Run unit tests to verify no regressions"
     ],
-    "passes": false
+    "passes": true
   },
   {
     "category": "refactor",
@@ -61,7 +61,7 @@
       "Update existing NewLoop to use LoopOptions internally",
       "Add unit tests for the new constructor"
     ],
-    "passes": false
+    "passes": true
   },
   {
     "category": "refactor",
@@ -73,7 +73,7 @@
       "Update Claude command building to use ClaudeConfig values",
       "Add unit tests for ClaudeConfig and command building"
     ],
-    "passes": false
+    "passes": true
   },
   {
     "category": "test",

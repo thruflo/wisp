@@ -397,6 +397,16 @@ func TestParseStreamJSON(t *testing.T) {
 	}
 }
 
+// TestDefaultClaudeConfig tests that DefaultClaudeConfig returns production defaults.
+func TestDefaultClaudeConfig(t *testing.T) {
+	cfg := DefaultClaudeConfig()
+
+	assert.Equal(t, 100, cfg.MaxTurns, "MaxTurns should be 100")
+	assert.Equal(t, float64(0), cfg.MaxBudget, "MaxBudget should be 0 (no limit)")
+	assert.True(t, cfg.Verbose, "Verbose should be true")
+	assert.Equal(t, "stream-json", cfg.OutputFormat, "OutputFormat should be stream-json")
+}
+
 // TestBuildClaudeArgs tests Claude command argument building.
 func TestBuildClaudeArgs(t *testing.T) {
 	loop := &Loop{
@@ -405,8 +415,9 @@ func TestBuildClaudeArgs(t *testing.T) {
 				MaxBudgetUSD: 15.50,
 			},
 		},
-		repoPath: "/home/sprite/org/repo",
-		wispPath: "/home/sprite/org/repo/.wisp",
+		repoPath:  "/home/sprite/org/repo",
+		wispPath:  "/home/sprite/org/repo/.wisp",
+		claudeCfg: DefaultClaudeConfig(),
 	}
 
 	args := loop.buildClaudeArgs()
@@ -420,7 +431,7 @@ func TestBuildClaudeArgs(t *testing.T) {
 	assert.Contains(t, args, "--max-turns")
 	assert.Contains(t, args, "100")
 
-	// Check budget flag
+	// Check budget flag from config.Limits (since ClaudeConfig.MaxBudget is 0)
 	assert.Contains(t, args, "--max-budget-usd")
 	assert.Contains(t, args, "15.50")
 
@@ -451,8 +462,9 @@ func TestBuildClaudeArgsNoBudget(t *testing.T) {
 				MaxBudgetUSD: 0, // No budget limit
 			},
 		},
-		repoPath: "/home/sprite/org/repo",
-		wispPath: "/home/sprite/org/repo/.wisp",
+		repoPath:  "/home/sprite/org/repo",
+		wispPath:  "/home/sprite/org/repo/.wisp",
+		claudeCfg: DefaultClaudeConfig(),
 	}
 
 	args := loop.buildClaudeArgs()
@@ -461,6 +473,122 @@ func TestBuildClaudeArgsNoBudget(t *testing.T) {
 	for _, arg := range args {
 		assert.NotEqual(t, "--max-budget-usd", arg)
 	}
+}
+
+// TestBuildClaudeArgsWithCustomClaudeConfig tests buildClaudeArgs with custom ClaudeConfig.
+func TestBuildClaudeArgsWithCustomClaudeConfig(t *testing.T) {
+	t.Run("custom max turns", func(t *testing.T) {
+		loop := &Loop{
+			cfg:      &config.Config{},
+			repoPath: "/home/sprite/org/repo",
+			wispPath: "/home/sprite/org/repo/.wisp",
+			claudeCfg: ClaudeConfig{
+				MaxTurns:     20,
+				Verbose:      true,
+				OutputFormat: "stream-json",
+			},
+		}
+
+		args := loop.buildClaudeArgs()
+
+		assert.Contains(t, args, "--max-turns")
+		assert.Contains(t, args, "20")
+		assert.NotContains(t, args, "100")
+	})
+
+	t.Run("custom budget from ClaudeConfig overrides config.Limits", func(t *testing.T) {
+		loop := &Loop{
+			cfg: &config.Config{
+				Limits: config.Limits{
+					MaxBudgetUSD: 50.0, // This should be ignored
+				},
+			},
+			repoPath: "/home/sprite/org/repo",
+			wispPath: "/home/sprite/org/repo/.wisp",
+			claudeCfg: ClaudeConfig{
+				MaxTurns:     100,
+				MaxBudget:    5.0, // ClaudeConfig budget takes precedence
+				Verbose:      true,
+				OutputFormat: "stream-json",
+			},
+		}
+
+		args := loop.buildClaudeArgs()
+
+		assert.Contains(t, args, "--max-budget-usd")
+		assert.Contains(t, args, "5.00")
+		assert.NotContains(t, args, "50.00")
+	})
+
+	t.Run("verbose disabled", func(t *testing.T) {
+		loop := &Loop{
+			cfg:      &config.Config{},
+			repoPath: "/home/sprite/org/repo",
+			wispPath: "/home/sprite/org/repo/.wisp",
+			claudeCfg: ClaudeConfig{
+				MaxTurns:     100,
+				Verbose:      false,
+				OutputFormat: "stream-json",
+			},
+		}
+
+		args := loop.buildClaudeArgs()
+
+		assert.NotContains(t, args, "--verbose")
+	})
+
+	t.Run("custom output format", func(t *testing.T) {
+		loop := &Loop{
+			cfg:      &config.Config{},
+			repoPath: "/home/sprite/org/repo",
+			wispPath: "/home/sprite/org/repo/.wisp",
+			claudeCfg: ClaudeConfig{
+				MaxTurns:     100,
+				Verbose:      true,
+				OutputFormat: "text",
+			},
+		}
+
+		args := loop.buildClaudeArgs()
+
+		assert.Contains(t, args, "--output-format")
+		assert.Contains(t, args, "text")
+		assert.NotContains(t, args, "stream-json")
+	})
+
+	t.Run("zero max turns omits flag", func(t *testing.T) {
+		loop := &Loop{
+			cfg:      &config.Config{},
+			repoPath: "/home/sprite/org/repo",
+			wispPath: "/home/sprite/org/repo/.wisp",
+			claudeCfg: ClaudeConfig{
+				MaxTurns:     0, // Zero means no limit
+				Verbose:      true,
+				OutputFormat: "stream-json",
+			},
+		}
+
+		args := loop.buildClaudeArgs()
+
+		assert.NotContains(t, args, "--max-turns")
+	})
+
+	t.Run("empty output format omits flag", func(t *testing.T) {
+		loop := &Loop{
+			cfg:      &config.Config{},
+			repoPath: "/home/sprite/org/repo",
+			wispPath: "/home/sprite/org/repo/.wisp",
+			claudeCfg: ClaudeConfig{
+				MaxTurns:     100,
+				Verbose:      true,
+				OutputFormat: "",
+			},
+		}
+
+		args := loop.buildClaudeArgs()
+
+		assert.NotContains(t, args, "--output-format")
+	})
 }
 
 // TestExitReasonString tests ExitReason.String().
@@ -966,6 +1094,53 @@ func TestNewLoopWithOptions(t *testing.T) {
 
 		loop := NewLoopWithOptions(opts)
 		assert.True(t, loop.startTime.IsZero())
+	})
+
+	t.Run("uses default ClaudeConfig when zero-valued", func(t *testing.T) {
+		opts := LoopOptions{
+			Client:      mockClient,
+			SyncManager: syncMgr,
+			Store:       store,
+			Config:      cfg,
+			Session:     session,
+			TUI:         mockTUI,
+			RepoPath:    "/home/sprite/test-org/test-repo",
+			// ClaudeConfig not set (zero value)
+		}
+
+		loop := NewLoopWithOptions(opts)
+
+		// Should use production defaults
+		assert.Equal(t, 100, loop.claudeCfg.MaxTurns)
+		assert.True(t, loop.claudeCfg.Verbose)
+		assert.Equal(t, "stream-json", loop.claudeCfg.OutputFormat)
+	})
+
+	t.Run("uses provided ClaudeConfig when non-zero", func(t *testing.T) {
+		customCfg := ClaudeConfig{
+			MaxTurns:     20,
+			MaxBudget:    10.0,
+			Verbose:      false,
+			OutputFormat: "text",
+		}
+
+		opts := LoopOptions{
+			Client:       mockClient,
+			SyncManager:  syncMgr,
+			Store:        store,
+			Config:       cfg,
+			Session:      session,
+			TUI:          mockTUI,
+			RepoPath:     "/home/sprite/test-org/test-repo",
+			ClaudeConfig: customCfg,
+		}
+
+		loop := NewLoopWithOptions(opts)
+
+		assert.Equal(t, 20, loop.claudeCfg.MaxTurns)
+		assert.Equal(t, 10.0, loop.claudeCfg.MaxBudget)
+		assert.False(t, loop.claudeCfg.Verbose)
+		assert.Equal(t, "text", loop.claudeCfg.OutputFormat)
 	})
 }
 
