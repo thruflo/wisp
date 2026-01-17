@@ -19,12 +19,10 @@
 package integration
 
 import (
-	"context"
 	"encoding/json"
 	"os"
 	"path/filepath"
 	"testing"
-	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -44,7 +42,7 @@ func TestRealSprite_CreateAndDelete(t *testing.T) {
 		testutil.CleanupSprite(t, env.Client, spriteName)
 	})
 
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	ctx, cancel := testutil.SpriteOperationContext(t)
 	defer cancel()
 
 	// Create the Sprite
@@ -77,7 +75,7 @@ func TestRealSprite_WriteReadFile(t *testing.T) {
 		testutil.CleanupSprite(t, env.Client, spriteName)
 	})
 
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	ctx, cancel := testutil.SpriteOperationContext(t)
 	defer cancel()
 
 	// Create the Sprite
@@ -127,7 +125,7 @@ func TestRealSprite_ExecuteCommand(t *testing.T) {
 		testutil.CleanupSprite(t, env.Client, spriteName)
 	})
 
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	ctx, cancel := testutil.SpriteOperationContext(t)
 	defer cancel()
 
 	// Create the Sprite
@@ -175,7 +173,7 @@ func TestRealSprite_StateFileRoundTrip(t *testing.T) {
 		testutil.CleanupSprite(t, env.Client, spriteName)
 	})
 
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	ctx, cancel := testutil.SpriteOperationContext(t)
 	defer cancel()
 
 	// Create the Sprite
@@ -234,7 +232,7 @@ func TestRealSprite_SyncManagerIntegration(t *testing.T) {
 		testutil.CleanupSprite(t, env.Client, spriteName)
 	})
 
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	ctx, cancel := testutil.SpriteOperationContext(t)
 	defer cancel()
 
 	// Create the Sprite
