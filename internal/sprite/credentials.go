@@ -67,23 +67,16 @@ func getLocalGitConfig(key string) (string, error) {
 // On macOS, credentials are stored in Keychain; on Linux they're in ~/.claude/.credentials.json.
 // The credentials are written to /var/local/wisp/.claude/.credentials.json on the Sprite
 // (due to permission issues with /home/sprite).
+// Note: The .claude directory is created by EnsureDirectoriesOnSprite, so we don't create it here.
 func CopyClaudeCredentials(ctx context.Context, client Client, spriteName string) error {
 	credentials, err := GetLocalClaudeCredentials()
 	if err != nil {
 		return err
 	}
 
-	// Create .claude directory on Sprite in /var/local/wisp
-	_, _, exitCode, err := client.ExecuteOutput(ctx, spriteName, "", nil, "mkdir", "-p", "/var/local/wisp/.claude")
-	if err != nil {
-		return fmt.Errorf("failed to create .claude directory: %w", err)
-	}
-	if exitCode != 0 {
-		return fmt.Errorf("mkdir .claude failed with exit code %d", exitCode)
-	}
-
-	// Write credentials to Sprite
-	if err := client.WriteFile(ctx, spriteName, "/var/local/wisp/.claude/.credentials.json", credentials); err != nil {
+	// Write credentials to Sprite (ClaudeDir is created by EnsureDirectoriesOnSprite)
+	credentialsPath := filepath.Join(ClaudeDir, ".credentials.json")
+	if err := client.WriteFile(ctx, spriteName, credentialsPath, credentials); err != nil {
 		return fmt.Errorf("failed to write credentials to sprite: %w", err)
 	}
 

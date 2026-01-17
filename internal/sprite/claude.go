@@ -22,6 +22,9 @@ var (
 
 	// ReposDir contains cloned repositories
 	ReposDir = filepath.Join(WispHome, "repos")
+
+	// ClaudeDir contains Claude Code credentials and settings
+	ClaudeDir = filepath.Join(WispHome, ".claude")
 )
 
 // ClaudeCommand builds a bash command to run Claude with proper environment setup.
