@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/thruflo/wisp/internal/config"
+	"github.com/thruflo/wisp/internal/server"
 	"github.com/thruflo/wisp/internal/sprite"
 	"github.com/thruflo/wisp/internal/state"
 	"github.com/thruflo/wisp/internal/tui"
@@ -98,12 +99,14 @@ type Loop struct {
 	cfg         *config.Config
 	session     *config.Session
 	tui         *tui.TUI
-	repoPath    string // Path on Sprite: /var/local/wisp/repos/<org>/<repo>
-	wispPath    string // Path on Sprite: <repoPath>/.wisp
+	server      *server.Server // Optional web server for remote access
+	repoPath    string         // Path on Sprite: /var/local/wisp/repos/<org>/<repo>
+	wispPath    string         // Path on Sprite: <repoPath>/.wisp
 	iteration   int
 	startTime   time.Time
 	templateDir string       // Local path to templates
 	claudeCfg   ClaudeConfig // Claude command configuration
+	eventSeq    int          // Sequence counter for Claude events
 }
 
 // LoopOptions holds configuration for creating a Loop instance.
@@ -115,6 +118,7 @@ type LoopOptions struct {
 	Config       *config.Config
 	Session      *config.Session
 	TUI          *tui.TUI
+	Server       *server.Server // Optional: web server for remote access
 	RepoPath     string
 	TemplateDir  string
 	StartTime    time.Time    // Optional: for deterministic time-based testing
@@ -160,6 +164,7 @@ func NewLoopWithOptions(opts LoopOptions) *Loop {
 		cfg:         opts.Config,
 		session:     opts.Session,
 		tui:         opts.TUI,
+		server:      opts.Server,
 		repoPath:    opts.RepoPath,
 		wispPath:    filepath.Join(opts.RepoPath, ".wisp"),
 		templateDir: opts.TemplateDir,
@@ -224,6 +229,9 @@ func (l *Loop) Run(ctx context.Context) Result {
 				Error:      fmt.Errorf("failed to sync state: %w", err),
 			}
 		}
+
+		// Broadcast state to web clients if server is running
+		l.broadcastState(iterResult)
 
 		// Record history
 		if err := l.recordHistory(ctx, iterResult); err != nil {
@@ -398,6 +406,9 @@ func (l *Loop) streamOutput(ctx context.Context, r io.ReadCloser) error {
 			l.tui.AppendTailLine(displayLine)
 			l.tui.Update()
 		}
+
+		// Broadcast Claude event to web clients if server is running
+		l.broadcastClaudeEvent(line)
 	}
 
 	return scanner.Err()
@@ -634,8 +645,28 @@ func (l *Loop) handleNeedsInput(ctx context.Context, st *state.State) Result {
 	l.tui.Bell()
 	l.tui.Update()
 
-	// Wait for user input
+	// Broadcast input request to web clients and get request ID
+	requestID := l.broadcastInputRequest(st.Question)
+
+	// Wait for user input from TUI or web client
 	for {
+		// Check for web client input
+		if l.server != nil && requestID != "" {
+			if response, ok := l.server.GetPendingInput(requestID); ok {
+				// Web client provided input
+				if err := l.sync.WriteResponseToSprite(ctx, l.session.SpriteName, response); err != nil {
+					return Result{
+						Reason:     ExitReasonCrash,
+						Iterations: l.iteration,
+						Error:      fmt.Errorf("failed to write response: %w", err),
+					}
+				}
+				// Broadcast that input request was responded
+				l.broadcastInputResponded(requestID, response)
+				return Result{Reason: ExitReasonUnknown}
+			}
+		}
+
 		select {
 		case <-ctx.Done():
 			return Result{Reason: ExitReasonBackground, Iterations: l.iteration}
@@ -651,7 +682,8 @@ func (l *Loop) handleNeedsInput(ctx context.Context, st *state.State) Result {
 						Error:      fmt.Errorf("failed to write response: %w", err),
 					}
 				}
-				// Continue loop
+				// Broadcast that input request was responded
+				l.broadcastInputResponded(requestID, action.Input)
 				return Result{Reason: ExitReasonUnknown}
 
 			case tui.ActionCancelInput:
@@ -666,6 +698,10 @@ func (l *Loop) handleNeedsInput(ctx context.Context, st *state.State) Result {
 			case tui.ActionBackground, tui.ActionQuit:
 				return Result{Reason: ExitReasonBackground, Iterations: l.iteration}
 			}
+
+		case <-time.After(100 * time.Millisecond):
+			// Poll for web client input periodically
+			continue
 		}
 	}
 }
@@ -757,3 +793,166 @@ var (
 	errUserKill       = errors.New("user killed session")
 	errUserBackground = errors.New("user backgrounded session")
 )
+
+// broadcastState broadcasts session and task state to web clients.
+// This is called after each state sync to keep web clients up to date.
+func (l *Loop) broadcastState(st *state.State) {
+	if l.server == nil {
+		return
+	}
+
+	streams := l.server.Streams()
+	if streams == nil {
+		return
+	}
+
+	// Map state.State status to server.SessionStatus
+	var status server.SessionStatus
+	switch st.Status {
+	case state.StatusDone:
+		status = server.SessionStatusDone
+	case state.StatusNeedsInput:
+		status = server.SessionStatusNeedsInput
+	case state.StatusBlocked:
+		status = server.SessionStatusBlocked
+	default:
+		status = server.SessionStatusRunning
+	}
+
+	// Broadcast session state
+	session := &server.Session{
+		ID:        l.session.Branch,
+		Repo:      l.session.Repo,
+		Branch:    l.session.Branch,
+		Spec:      l.session.Spec,
+		Status:    status,
+		Iteration: l.iteration,
+		StartedAt: l.session.StartedAt.Format(time.RFC3339),
+	}
+	streams.BroadcastSession(session)
+
+	// Broadcast tasks
+	tasks, err := l.store.LoadTasks(l.session.Branch)
+	if err != nil {
+		return
+	}
+
+	for i, t := range tasks {
+		var taskStatus server.TaskStatus
+		if t.Passes {
+			taskStatus = server.TaskStatusCompleted
+		} else {
+			// The first incomplete task is considered in progress
+			foundIncomplete := false
+			for j := 0; j < i; j++ {
+				if !tasks[j].Passes {
+					foundIncomplete = true
+					break
+				}
+			}
+			if !foundIncomplete && !t.Passes {
+				taskStatus = server.TaskStatusInProgress
+			} else {
+				taskStatus = server.TaskStatusPending
+			}
+		}
+
+		task := &server.Task{
+			ID:        fmt.Sprintf("%s-task-%d", l.session.Branch, i),
+			SessionID: l.session.Branch,
+			Order:     i,
+			Content:   t.Description,
+			Status:    taskStatus,
+		}
+		streams.BroadcastTask(task)
+	}
+}
+
+// broadcastClaudeEvent broadcasts a Claude output line to web clients.
+func (l *Loop) broadcastClaudeEvent(line string) {
+	if l.server == nil {
+		return
+	}
+
+	streams := l.server.Streams()
+	if streams == nil {
+		return
+	}
+
+	// Skip empty lines
+	line = strings.TrimSpace(line)
+	if line == "" {
+		return
+	}
+
+	// Try to parse as JSON to pass through raw SDK message
+	var sdkMessage any
+	if err := json.Unmarshal([]byte(line), &sdkMessage); err != nil {
+		// Not valid JSON, skip
+		return
+	}
+
+	// Increment sequence for this iteration
+	l.eventSeq++
+
+	event := &server.ClaudeEvent{
+		ID:        fmt.Sprintf("%s-%d-%d", l.session.Branch, l.iteration, l.eventSeq),
+		SessionID: l.session.Branch,
+		Iteration: l.iteration,
+		Sequence:  l.eventSeq,
+		Message:   sdkMessage,
+		Timestamp: time.Now().Format(time.RFC3339),
+	}
+
+	streams.BroadcastClaudeEvent(event)
+}
+
+// broadcastInputRequest broadcasts an input request to web clients.
+// Returns the request ID for tracking responses.
+func (l *Loop) broadcastInputRequest(question string) string {
+	if l.server == nil {
+		return ""
+	}
+
+	streams := l.server.Streams()
+	if streams == nil {
+		return ""
+	}
+
+	requestID := fmt.Sprintf("%s-%d-input", l.session.Branch, l.iteration)
+
+	req := &server.InputRequest{
+		ID:        requestID,
+		SessionID: l.session.Branch,
+		Iteration: l.iteration,
+		Question:  question,
+		Responded: false,
+		Response:  nil,
+	}
+
+	streams.BroadcastInputRequest(req)
+	return requestID
+}
+
+// broadcastInputResponded broadcasts that an input request has been responded to.
+func (l *Loop) broadcastInputResponded(requestID, response string) {
+	if l.server == nil || requestID == "" {
+		return
+	}
+
+	streams := l.server.Streams()
+	if streams == nil {
+		return
+	}
+
+	req := &server.InputRequest{
+		ID:        requestID,
+		SessionID: l.session.Branch,
+		Iteration: l.iteration,
+		Question:  "", // Question is not needed for update
+		Responded: true,
+		Response:  &response,
+	}
+
+	streams.BroadcastInputRequest(req)
+}

@@ -12,7 +12,9 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"github.com/thruflo/wisp/internal/auth"
 	"github.com/thruflo/wisp/internal/config"
+	"github.com/thruflo/wisp/internal/server"
 	"github.com/thruflo/wisp/internal/sprite"
 	"github.com/thruflo/wisp/internal/state"
 	"github.com/thruflo/wisp/internal/tui"
@@ -1290,4 +1292,579 @@ func TestLoopRunWithInjectedStartTime(t *testing.T) {
 		// Should exit due to context cancellation, not duration
 		assert.Equal(t, ExitReasonBackground, result.Reason)
 	})
+}
+
+// TestBroadcastState tests that session and task state is broadcast to the server.
+func TestBroadcastState(t *testing.T) {
+	t.Parallel()
+
+	tmpDir := t.TempDir()
+	store := state.NewStore(tmpDir)
+	branch := "test-broadcast"
+
+	// Create session
+	startTime := time.Now()
+	session := &config.Session{
+		Repo:       "org/repo",
+		Branch:     branch,
+		Spec:       "docs/spec.md",
+		SpriteName: "wisp-test",
+		StartedAt:  startTime,
+	}
+	require.NoError(t, store.CreateSession(session))
+
+	// Create tasks
+	tasks := []state.Task{
+		{Description: "Task 1", Passes: true},
+		{Description: "Task 2", Passes: false},
+		{Description: "Task 3", Passes: false},
+	}
+	require.NoError(t, store.SaveTasks(branch, tasks))
+
+	// Create server
+	hash, err := auth.HashPassword("testpass")
+	require.NoError(t, err)
+	srv, err := server.NewServer(&server.Config{
+		Port:         0, // Auto-assign port
+		PasswordHash: hash,
+	})
+	require.NoError(t, err)
+
+	// Create loop with server
+	mockClient := NewMockSpriteClient()
+	syncMgr := state.NewSyncManager(mockClient, store)
+	mockTUI := tui.NewTUI(io.Discard)
+	cfg := &config.Config{
+		Limits: config.Limits{
+			MaxIterations: 10,
+		},
+	}
+
+	loop := NewLoopWithOptions(LoopOptions{
+		Client:      mockClient,
+		SyncManager: syncMgr,
+		Store:       store,
+		Config:      cfg,
+		Session:     session,
+		TUI:         mockTUI,
+		Server:      srv,
+		RepoPath:    "/var/local/wisp/repos/org/repo",
+		StartTime:   startTime,
+	})
+	loop.iteration = 5
+
+	// Test broadcastState
+	st := &state.State{
+		Status:  state.StatusContinue,
+		Summary: "Working on task 2",
+	}
+
+	loop.broadcastState(st)
+
+	// Verify session was broadcast
+	sessions, broadcastTasks, _ := srv.Streams().GetCurrentState()
+	require.Len(t, sessions, 1, "expected 1 session")
+	assert.Equal(t, branch, sessions[0].ID)
+	assert.Equal(t, "org/repo", sessions[0].Repo)
+	assert.Equal(t, branch, sessions[0].Branch)
+	assert.Equal(t, "docs/spec.md", sessions[0].Spec)
+	assert.Equal(t, server.SessionStatusRunning, sessions[0].Status)
+	assert.Equal(t, 5, sessions[0].Iteration)
+
+	// Verify tasks were broadcast
+	require.Len(t, broadcastTasks, 3, "expected 3 tasks")
+
+	// Find tasks by order
+	tasksByOrder := make(map[int]*server.Task)
+	for _, task := range broadcastTasks {
+		tasksByOrder[task.Order] = task
+	}
+
+	// Task 0 (completed)
+	assert.Equal(t, server.TaskStatusCompleted, tasksByOrder[0].Status)
+	assert.Equal(t, "Task 1", tasksByOrder[0].Content)
+
+	// Task 1 (in progress - first incomplete)
+	assert.Equal(t, server.TaskStatusInProgress, tasksByOrder[1].Status)
+	assert.Equal(t, "Task 2", tasksByOrder[1].Content)
+
+	// Task 2 (pending)
+	assert.Equal(t, server.TaskStatusPending, tasksByOrder[2].Status)
+	assert.Equal(t, "Task 3", tasksByOrder[2].Content)
+}
+
+// TestBroadcastStateNeedsInput tests that NEEDS_INPUT status is correctly broadcast.
+func TestBroadcastStateNeedsInput(t *testing.T) {
+	t.Parallel()
+
+	tmpDir := t.TempDir()
+	store := state.NewStore(tmpDir)
+	branch := "test-needs-input-broadcast"
+
+	session := &config.Session{
+		Repo:       "org/repo",
+		Branch:     branch,
+		SpriteName: "wisp-test",
+		StartedAt:  time.Now(),
+	}
+	require.NoError(t, store.CreateSession(session))
+
+	// Create server
+	hash, err := auth.HashPassword("testpass")
+	require.NoError(t, err)
+	srv, err := server.NewServer(&server.Config{
+		Port:         0,
+		PasswordHash: hash,
+	})
+	require.NoError(t, err)
+
+	mockClient := NewMockSpriteClient()
+	syncMgr := state.NewSyncManager(mockClient, store)
+	mockTUI := tui.NewTUI(io.Discard)
+	cfg := &config.Config{}
+
+	loop := NewLoopWithOptions(LoopOptions{
+		Client:      mockClient,
+		SyncManager: syncMgr,
+		Store:       store,
+		Config:      cfg,
+		Session:     session,
+		TUI:         mockTUI,
+		Server:      srv,
+		RepoPath:    "/var/local/wisp/repos/org/repo",
+	})
+
+	// Test with NEEDS_INPUT state
+	st := &state.State{
+		Status:   state.StatusNeedsInput,
+		Summary:  "Awaiting input",
+		Question: "What database?",
+	}
+
+	loop.broadcastState(st)
+
+	sessions, _, _ := srv.Streams().GetCurrentState()
+	require.Len(t, sessions, 1)
+	assert.Equal(t, server.SessionStatusNeedsInput, sessions[0].Status)
+}
+
+// TestBroadcastStateBlocked tests that BLOCKED status is correctly broadcast.
+func TestBroadcastStateBlocked(t *testing.T) {
+	t.Parallel()
+
+	tmpDir := t.TempDir()
+	store := state.NewStore(tmpDir)
+	branch := "test-blocked-broadcast"
+
+	session := &config.Session{
+		Repo:       "org/repo",
+		Branch:     branch,
+		SpriteName: "wisp-test",
+		StartedAt:  time.Now(),
+	}
+	require.NoError(t, store.CreateSession(session))
+
+	hash, err := auth.HashPassword("testpass")
+	require.NoError(t, err)
+	srv, err := server.NewServer(&server.Config{
+		Port:         0,
+		PasswordHash: hash,
+	})
+	require.NoError(t, err)
+
+	mockClient := NewMockSpriteClient()
+	syncMgr := state.NewSyncManager(mockClient, store)
+	mockTUI := tui.NewTUI(io.Discard)
+	cfg := &config.Config{}
+
+	loop := NewLoopWithOptions(LoopOptions{
+		Client:      mockClient,
+		SyncManager: syncMgr,
+		Store:       store,
+		Config:      cfg,
+		Session:     session,
+		TUI:         mockTUI,
+		Server:      srv,
+		RepoPath:    "/var/local/wisp/repos/org/repo",
+	})
+
+	st := &state.State{
+		Status: state.StatusBlocked,
+		Error:  "Missing dependency",
+	}
+
+	loop.broadcastState(st)
+
+	sessions, _, _ := srv.Streams().GetCurrentState()
+	require.Len(t, sessions, 1)
+	assert.Equal(t, server.SessionStatusBlocked, sessions[0].Status)
+}
+
+// TestBroadcastStateDone tests that DONE status is correctly broadcast.
+func TestBroadcastStateDone(t *testing.T) {
+	t.Parallel()
+
+	tmpDir := t.TempDir()
+	store := state.NewStore(tmpDir)
+	branch := "test-done-broadcast"
+
+	session := &config.Session{
+		Repo:       "org/repo",
+		Branch:     branch,
+		SpriteName: "wisp-test",
+		StartedAt:  time.Now(),
+	}
+	require.NoError(t, store.CreateSession(session))
+
+	hash, err := auth.HashPassword("testpass")
+	require.NoError(t, err)
+	srv, err := server.NewServer(&server.Config{
+		Port:         0,
+		PasswordHash: hash,
+	})
+	require.NoError(t, err)
+
+	mockClient := NewMockSpriteClient()
+	syncMgr := state.NewSyncManager(mockClient, store)
+	mockTUI := tui.NewTUI(io.Discard)
+	cfg := &config.Config{}
+
+	loop := NewLoopWithOptions(LoopOptions{
+		Client:      mockClient,
+		SyncManager: syncMgr,
+		Store:       store,
+		Config:      cfg,
+		Session:     session,
+		TUI:         mockTUI,
+		Server:      srv,
+		RepoPath:    "/var/local/wisp/repos/org/repo",
+	})
+
+	st := &state.State{
+		Status:  state.StatusDone,
+		Summary: "All tasks completed",
+	}
+
+	loop.broadcastState(st)
+
+	sessions, _, _ := srv.Streams().GetCurrentState()
+	require.Len(t, sessions, 1)
+	assert.Equal(t, server.SessionStatusDone, sessions[0].Status)
+}
+
+// TestBroadcastStateNoServer tests that broadcastState is a no-op without server.
+func TestBroadcastStateNoServer(t *testing.T) {
+	t.Parallel()
+
+	tmpDir := t.TempDir()
+	store := state.NewStore(tmpDir)
+	branch := "test-no-server"
+
+	session := &config.Session{
+		Branch:     branch,
+		SpriteName: "wisp-test",
+	}
+
+	mockClient := NewMockSpriteClient()
+	syncMgr := state.NewSyncManager(mockClient, store)
+	mockTUI := tui.NewTUI(io.Discard)
+	cfg := &config.Config{}
+
+	// No server
+	loop := NewLoopWithOptions(LoopOptions{
+		Client:      mockClient,
+		SyncManager: syncMgr,
+		Store:       store,
+		Config:      cfg,
+		Session:     session,
+		TUI:         mockTUI,
+		Server:      nil, // No server
+		RepoPath:    "/var/local/wisp/repos/org/repo",
+	})
+
+	// Should not panic
+	st := &state.State{Status: state.StatusContinue}
+	loop.broadcastState(st)
+}
+
+// TestBroadcastClaudeEvent tests that Claude events are broadcast to the server.
+func TestBroadcastClaudeEvent(t *testing.T) {
+	t.Parallel()
+
+	tmpDir := t.TempDir()
+	store := state.NewStore(tmpDir)
+	branch := "test-claude-event"
+
+	session := &config.Session{
+		Branch:     branch,
+		SpriteName: "wisp-test",
+	}
+
+	hash, err := auth.HashPassword("testpass")
+	require.NoError(t, err)
+	srv, err := server.NewServer(&server.Config{
+		Port:         0,
+		PasswordHash: hash,
+	})
+	require.NoError(t, err)
+
+	mockClient := NewMockSpriteClient()
+	syncMgr := state.NewSyncManager(mockClient, store)
+	mockTUI := tui.NewTUI(io.Discard)
+	cfg := &config.Config{}
+
+	loop := NewLoopWithOptions(LoopOptions{
+		Client:      mockClient,
+		SyncManager: syncMgr,
+		Store:       store,
+		Config:      cfg,
+		Session:     session,
+		TUI:         mockTUI,
+		Server:      srv,
+		RepoPath:    "/var/local/wisp/repos/org/repo",
+	})
+	loop.iteration = 3
+
+	// Broadcast a Claude event (stream-json format)
+	jsonLine := `{"type":"assistant","message":{"content":[{"type":"text","text":"Hello, world!"}]}}`
+	loop.broadcastClaudeEvent(jsonLine)
+
+	// Sequence should increment
+	assert.Equal(t, 1, loop.eventSeq)
+
+	// Broadcast another event
+	jsonLine2 := `{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Bash","input":{"command":"ls"}}]}}`
+	loop.broadcastClaudeEvent(jsonLine2)
+
+	assert.Equal(t, 2, loop.eventSeq)
+}
+
+// TestBroadcastClaudeEventSkipsInvalidJSON tests that non-JSON lines are skipped.
+func TestBroadcastClaudeEventSkipsInvalidJSON(t *testing.T) {
+	t.Parallel()
+
+	tmpDir := t.TempDir()
+	store := state.NewStore(tmpDir)
+	branch := "test-invalid-json"
+
+	session := &config.Session{
+		Branch:     branch,
+		SpriteName: "wisp-test",
+	}
+
+	hash, err := auth.HashPassword("testpass")
+	require.NoError(t, err)
+	srv, err := server.NewServer(&server.Config{
+		Port:         0,
+		PasswordHash: hash,
+	})
+	require.NoError(t, err)
+
+	mockClient := NewMockSpriteClient()
+	syncMgr := state.NewSyncManager(mockClient, store)
+	mockTUI := tui.NewTUI(io.Discard)
+	cfg := &config.Config{}
+
+	loop := NewLoopWithOptions(LoopOptions{
+		Client:      mockClient,
+		SyncManager: syncMgr,
+		Store:       store,
+		Config:      cfg,
+		Session:     session,
+		TUI:         mockTUI,
+		Server:      srv,
+		RepoPath:    "/var/local/wisp/repos/org/repo",
+	})
+
+	// Broadcast invalid JSON - should not increment sequence
+	loop.broadcastClaudeEvent("not valid json")
+	assert.Equal(t, 0, loop.eventSeq)
+
+	// Empty line
+	loop.broadcastClaudeEvent("")
+	assert.Equal(t, 0, loop.eventSeq)
+
+	// Whitespace only
+	loop.broadcastClaudeEvent("   ")
+	assert.Equal(t, 0, loop.eventSeq)
+}
+
+// TestBroadcastInputRequest tests that input requests are broadcast.
+func TestBroadcastInputRequest(t *testing.T) {
+	t.Parallel()
+
+	tmpDir := t.TempDir()
+	store := state.NewStore(tmpDir)
+	branch := "test-input-request"
+
+	session := &config.Session{
+		Branch:     branch,
+		SpriteName: "wisp-test",
+	}
+
+	hash, err := auth.HashPassword("testpass")
+	require.NoError(t, err)
+	srv, err := server.NewServer(&server.Config{
+		Port:         0,
+		PasswordHash: hash,
+	})
+	require.NoError(t, err)
+
+	mockClient := NewMockSpriteClient()
+	syncMgr := state.NewSyncManager(mockClient, store)
+	mockTUI := tui.NewTUI(io.Discard)
+	cfg := &config.Config{}
+
+	loop := NewLoopWithOptions(LoopOptions{
+		Client:      mockClient,
+		SyncManager: syncMgr,
+		Store:       store,
+		Config:      cfg,
+		Session:     session,
+		TUI:         mockTUI,
+		Server:      srv,
+		RepoPath:    "/var/local/wisp/repos/org/repo",
+	})
+	loop.iteration = 7
+
+	// Broadcast input request
+	requestID := loop.broadcastInputRequest("What database should we use?")
+
+	assert.Equal(t, "test-input-request-7-input", requestID)
+
+	// Verify input request was broadcast
+	_, _, inputRequests := srv.Streams().GetCurrentState()
+	require.Len(t, inputRequests, 1)
+	assert.Equal(t, requestID, inputRequests[0].ID)
+	assert.Equal(t, branch, inputRequests[0].SessionID)
+	assert.Equal(t, 7, inputRequests[0].Iteration)
+	assert.Equal(t, "What database should we use?", inputRequests[0].Question)
+	assert.False(t, inputRequests[0].Responded)
+	assert.Nil(t, inputRequests[0].Response)
+}
+
+// TestBroadcastInputResponded tests that input responses are broadcast.
+func TestBroadcastInputResponded(t *testing.T) {
+	t.Parallel()
+
+	tmpDir := t.TempDir()
+	store := state.NewStore(tmpDir)
+	branch := "test-input-responded"
+
+	session := &config.Session{
+		Branch:     branch,
+		SpriteName: "wisp-test",
+	}
+
+	hash, err := auth.HashPassword("testpass")
+	require.NoError(t, err)
+	srv, err := server.NewServer(&server.Config{
+		Port:         0,
+		PasswordHash: hash,
+	})
+	require.NoError(t, err)
+
+	mockClient := NewMockSpriteClient()
+	syncMgr := state.NewSyncManager(mockClient, store)
+	mockTUI := tui.NewTUI(io.Discard)
+	cfg := &config.Config{}
+
+	loop := NewLoopWithOptions(LoopOptions{
+		Client:      mockClient,
+		SyncManager: syncMgr,
+		Store:       store,
+		Config:      cfg,
+		Session:     session,
+		TUI:         mockTUI,
+		Server:      srv,
+		RepoPath:    "/var/local/wisp/repos/org/repo",
+	})
+	loop.iteration = 4
+
+	// First broadcast the request
+	requestID := loop.broadcastInputRequest("Question?")
+
+	// Then broadcast the response
+	loop.broadcastInputResponded(requestID, "Answer!")
+
+	// Verify input request was updated
+	_, _, inputRequests := srv.Streams().GetCurrentState()
+	require.Len(t, inputRequests, 1)
+	assert.True(t, inputRequests[0].Responded)
+	require.NotNil(t, inputRequests[0].Response)
+	assert.Equal(t, "Answer!", *inputRequests[0].Response)
+}
+
+// TestBroadcastInputRequestNoServer tests that broadcastInputRequest handles no server.
+func TestBroadcastInputRequestNoServer(t *testing.T) {
+	t.Parallel()
+
+	tmpDir := t.TempDir()
+	store := state.NewStore(tmpDir)
+	branch := "test-no-server-input"
+
+	session := &config.Session{
+		Branch:     branch,
+		SpriteName: "wisp-test",
+	}
+
+	mockClient := NewMockSpriteClient()
+	syncMgr := state.NewSyncManager(mockClient, store)
+	mockTUI := tui.NewTUI(io.Discard)
+	cfg := &config.Config{}
+
+	// No server
+	loop := NewLoopWithOptions(LoopOptions{
+		Client:      mockClient,
+		SyncManager: syncMgr,
+		Store:       store,
+		Config:      cfg,
+		Session:     session,
+		TUI:         mockTUI,
+		Server:      nil,
+		RepoPath:    "/var/local/wisp/repos/org/repo",
+	})
+
+	// Should return empty string
+	requestID := loop.broadcastInputRequest("Question?")
+	assert.Equal(t, "", requestID)
+
+	// broadcastInputResponded should be a no-op
+	loop.broadcastInputResponded("some-id", "response") // Should not panic
+}
+
+// TestLoopWithServerOption tests that NewLoopWithOptions correctly stores server.
+func TestLoopWithServerOption(t *testing.T) {
+	t.Parallel()
+
+	tmpDir := t.TempDir()
+	store := state.NewStore(tmpDir)
+
+	hash, err := auth.HashPassword("testpass")
+	require.NoError(t, err)
+	srv, err := server.NewServer(&server.Config{
+		Port:         0,
+		PasswordHash: hash,
+	})
+	require.NoError(t, err)
+
+	mockClient := NewMockSpriteClient()
+	syncMgr := state.NewSyncManager(mockClient, store)
+	mockTUI := tui.NewTUI(io.Discard)
+	cfg := &config.Config{}
+	session := &config.Session{Branch: "test-branch"}
+
+	loop := NewLoopWithOptions(LoopOptions{
+		Client:      mockClient,
+		SyncManager: syncMgr,
+		Store:       store,
+		Config:      cfg,
+		Session:     session,
+		TUI:         mockTUI,
+		Server:      srv,
+		RepoPath:    "/var/local/wisp/repos/org/repo",
+	})
+
+	assert.NotNil(t, loop.server)
+	assert.Equal(t, srv, loop.server)
 }
