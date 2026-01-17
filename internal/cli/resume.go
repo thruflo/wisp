@@ -102,10 +102,23 @@ func runResume(cmd *cobra.Command, args []string) error {
 	// Determine template name (default to "default" if not stored)
 	templateName := "default"
 
-	// Setup fresh Sprite for resume
+	// Setup Sprite for resume (reuses existing sprite if available)
 	repoPath, err := setupSpriteForResume(ctx, client, syncMgr, session, settings, env, cwd, templateName)
 	if err != nil {
 		return fmt.Errorf("failed to setup sprite: %w", err)
+	}
+
+	// Check if state was initialized (tasks.json exists locally).
+	// If not, the previous start crashed before completing - regenerate tasks.
+	if !store.HasInitializedState(branch) {
+		fmt.Printf("No tasks found, generating tasks from RFC...\n")
+		if err := RunCreateTasksPrompt(ctx, client, session, repoPath); err != nil {
+			return fmt.Errorf("failed to generate tasks: %w", err)
+		}
+		// Sync generated state from Sprite to local
+		if err := syncMgr.SyncFromSprite(ctx, session.SpriteName, branch, repoPath); err != nil {
+			fmt.Printf("Warning: failed to sync initial state: %v\n", err)
+		}
 	}
 
 	// Sync local state files to Sprite
@@ -173,7 +186,7 @@ func runResume(cmd *cobra.Command, args []string) error {
 	return nil
 }
 
-// setupSpriteForResume creates and configures a fresh Sprite for resuming a session.
+// setupSpriteForResume creates or reuses a Sprite for resuming a session.
 // Unlike SetupSprite for start, this checks out an existing branch instead of creating one.
 func setupSpriteForResume(
 	ctx context.Context,
@@ -185,25 +198,82 @@ func setupSpriteForResume(
 	localBasePath string,
 	templateName string,
 ) (string, error) {
-	// Create Sprite (from checkpoint if specified)
-	fmt.Printf("Creating Sprite %s...\n", session.SpriteName)
-	if err := client.Create(ctx, session.SpriteName, session.Checkpoint); err != nil {
-		return "", fmt.Errorf("failed to create sprite: %w", err)
+	// Check if sprite already exists (e.g., from stop without --teardown)
+	exists, err := client.Exists(ctx, session.SpriteName)
+	if err != nil {
+		return "", fmt.Errorf("failed to check sprite existence: %w", err)
 	}
 
-	// Parse repo org/name
+	// Parse repo org/name (needed for repo path)
 	parts := strings.Split(session.Repo, "/")
 	if len(parts) != 2 {
 		return "", fmt.Errorf("invalid repo format %q, expected org/repo", session.Repo)
 	}
 	org, repo := parts[0], parts[1]
+	// Clone to /var/local/wisp/repos/{org}/{repo}
+	repoPath := filepath.Join(sprite.ReposDir, org, repo)
 
-	// Repo path on Sprite
-	repoPath := filepath.Join("/home/sprite", org, repo)
+	if exists {
+		// Sprite exists - reuse it, just sync state and pull latest
+		fmt.Printf("Resuming on existing Sprite %s...\n", session.SpriteName)
 
-	// Clone primary repo
+		// Sync local state to sprite
+		if err := syncMgr.SyncToSprite(ctx, session.SpriteName, session.Branch, repoPath); err != nil {
+			// State sync failed - sprite may be in bad state, warn but continue
+			fmt.Printf("Warning: failed to sync state to sprite: %v\n", err)
+		}
+
+		// Ensure spec file is present (may have been updated locally)
+		if err := CopySpecFile(ctx, client, session.SpriteName, localBasePath, session.Spec); err != nil {
+			fmt.Printf("Warning: failed to copy spec file: %v\n", err)
+		}
+
+		// Ensure templates are present (may have been updated locally)
+		templateDir := filepath.Join(localBasePath, ".wisp", "templates", templateName)
+		if err := syncMgr.CopyTemplatesToSprite(ctx, session.SpriteName, templateDir); err != nil {
+			fmt.Printf("Warning: failed to copy templates: %v\n", err)
+		}
+
+		// Ensure environment variables are present at the correct location
+		if err := InjectEnvVars(ctx, client, session.SpriteName, env); err != nil {
+			fmt.Printf("Warning: failed to inject env vars: %v\n", err)
+		}
+
+		// Ensure Claude credentials are present (may have been refreshed locally)
+		if err := sprite.CopyClaudeCredentials(ctx, client, session.SpriteName); err != nil {
+			fmt.Printf("Warning: failed to copy Claude credentials: %v\n", err)
+		}
+
+		return repoPath, nil
+	}
+
+	// Sprite doesn't exist - create fresh and set up
+	fmt.Printf("Creating Sprite %s...\n", session.SpriteName)
+	if err := client.Create(ctx, session.SpriteName, session.Checkpoint); err != nil {
+		return "", fmt.Errorf("failed to create sprite: %w", err)
+	}
+
+	// Create directory structure: /var/local/wisp/{session,templates,repos}
+	fmt.Printf("Creating directories...\n")
+	if err := syncMgr.EnsureDirectoriesOnSprite(ctx, session.SpriteName); err != nil {
+		return "", fmt.Errorf("failed to create directories: %w", err)
+	}
+
+	// Get GitHub token for cloning
+	githubToken := env["GITHUB_TOKEN"]
+	if githubToken == "" {
+		githubToken = os.Getenv("GITHUB_TOKEN")
+	}
+
+	// Setup git config
+	fmt.Printf("Setting up git config...\n")
+	if err := sprite.SetupGitConfig(ctx, client, session.SpriteName); err != nil {
+		return "", fmt.Errorf("failed to setup git config: %w", err)
+	}
+
+	// Clone primary repo (token embedded in URL for auth)
 	fmt.Printf("Cloning %s...\n", session.Repo)
-	if err := CloneRepo(ctx, client, session.SpriteName, session.Repo, repoPath); err != nil {
+	if err := CloneRepo(ctx, client, session.SpriteName, session.Repo, repoPath, githubToken); err != nil {
 		return "", fmt.Errorf("failed to clone repo: %w", err)
 	}
 
@@ -213,6 +283,12 @@ func setupSpriteForResume(
 		return "", fmt.Errorf("failed to checkout branch: %w", err)
 	}
 
+	// Copy spec file from local to Sprite
+	fmt.Printf("Copying spec file %s...\n", session.Spec)
+	if err := CopySpecFile(ctx, client, session.SpriteName, localBasePath, session.Spec); err != nil {
+		return "", fmt.Errorf("failed to copy spec file: %w", err)
+	}
+
 	// Clone sibling repos
 	for _, sibling := range session.Siblings {
 		siblingParts := strings.Split(sibling, "/")
@@ -220,10 +296,10 @@ func setupSpriteForResume(
 			return "", fmt.Errorf("invalid sibling repo format %q, expected org/repo", sibling)
 		}
 		siblingOrg, siblingRepo := siblingParts[0], siblingParts[1]
-		siblingPath := filepath.Join("/home/sprite", siblingOrg, siblingRepo)
+		siblingPath := filepath.Join(sprite.ReposDir, siblingOrg, siblingRepo)
 
 		fmt.Printf("Cloning sibling %s...\n", sibling)
-		if err := CloneRepo(ctx, client, session.SpriteName, sibling, siblingPath); err != nil {
+		if err := CloneRepo(ctx, client, session.SpriteName, sibling, siblingPath, githubToken); err != nil {
 			return "", fmt.Errorf("failed to clone sibling %s: %w", sibling, err)
 		}
 	}
@@ -234,10 +310,10 @@ func setupSpriteForResume(
 		return "", fmt.Errorf("failed to copy settings: %w", err)
 	}
 
-	// Copy templates to repo .wisp/
+	// Copy templates to /var/local/wisp/templates/
 	templateDir := filepath.Join(localBasePath, ".wisp", "templates", templateName)
 	fmt.Printf("Copying templates...\n")
-	if err := syncMgr.CopyTemplatesToSprite(ctx, session.SpriteName, repoPath, templateDir); err != nil {
+	if err := syncMgr.CopyTemplatesToSprite(ctx, session.SpriteName, templateDir); err != nil {
 		return "", fmt.Errorf("failed to copy templates: %w", err)
 	}
 
@@ -247,6 +323,12 @@ func setupSpriteForResume(
 		return "", fmt.Errorf("failed to inject env vars: %w", err)
 	}
 
+	// Copy Claude credentials for Claude Max authentication
+	fmt.Printf("Copying Claude credentials...\n")
+	if err := sprite.CopyClaudeCredentials(ctx, client, session.SpriteName); err != nil {
+		return "", fmt.Errorf("failed to copy Claude credentials: %w", err)
+	}
+
 	return repoPath, nil
 }
 
@@ -254,22 +336,18 @@ func setupSpriteForResume(
 // It tries to checkout a remote branch first, falling back to creating the branch
 // if it doesn't exist on the remote (for branches that haven't been pushed yet).
 func checkoutBranch(ctx context.Context, client sprite.Client, spriteName, repoPath, branch string) error {
-	// Try to fetch the branch from remote first
+	// Try to fetch the branch from remote first (ignore errors, branch might not exist)
 	fetchCmd := fmt.Sprintf("git fetch origin %s:%s 2>/dev/null || true", branch, branch)
-	cmd, err := client.Execute(ctx, spriteName, repoPath, nil, "bash", "-c", fetchCmd)
-	if err != nil {
-		return fmt.Errorf("failed to start fetch: %w", err)
-	}
-	_ = cmd.Wait() // Ignore error, branch might not exist on remote
+	_, _, _, _ = client.ExecuteOutput(ctx, spriteName, repoPath, nil, "bash", "-c", fetchCmd)
 
 	// Checkout the branch (create if it doesn't exist)
 	checkoutCmd := fmt.Sprintf("git checkout %s 2>/dev/null || git checkout -b %s", branch, branch)
-	cmd, err = client.Execute(ctx, spriteName, repoPath, nil, "bash", "-c", checkoutCmd)
+	_, stderr, exitCode, err := client.ExecuteOutput(ctx, spriteName, repoPath, nil, "bash", "-c", checkoutCmd)
 	if err != nil {
-		return fmt.Errorf("failed to start checkout: %w", err)
+		return fmt.Errorf("failed to run checkout: %w", err)
 	}
-	if err := cmd.Wait(); err != nil {
-		return fmt.Errorf("checkout failed: %w", err)
+	if exitCode != 0 {
+		return fmt.Errorf("checkout failed with exit code %d: %s", exitCode, string(stderr))
 	}
 
 	return nil

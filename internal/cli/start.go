@@ -336,8 +336,8 @@ func slugify(s string) string {
 }
 
 // SetupSprite creates and configures a Sprite for a session.
-// It creates the Sprite, clones repositories, creates a branch, copies settings
-// and templates, and injects environment variables.
+// If a sprite already exists and is healthy (repo is cloned), it reuses it.
+// Otherwise it creates a fresh sprite.
 // Returns the repository path on the Sprite.
 // Exported for testing.
 func SetupSprite(
@@ -349,25 +349,67 @@ func SetupSprite(
 	env map[string]string,
 	localBasePath string,
 ) (string, error) {
+	// Parse repo org/name (needed for repo path)
+	parts := strings.Split(session.Repo, "/")
+	if len(parts) != 2 {
+		return "", fmt.Errorf("invalid repo format %q, expected org/repo", session.Repo)
+	}
+	org, repo := parts[0], parts[1]
+	// Clone to /var/local/wisp/repos/{org}/{repo}
+	repoPath := filepath.Join(sprite.ReposDir, org, repo)
+
+	// Check if sprite already exists
+	exists, err := client.Exists(ctx, session.SpriteName)
+	if err != nil {
+		return "", fmt.Errorf("failed to check sprite existence: %w", err)
+	}
+
+	if exists {
+		// Sprite exists - check if it's healthy by verifying repo path exists
+		fmt.Printf("Found existing Sprite %s, checking health...\n", session.SpriteName)
+
+		// Check if repo directory exists on sprite
+		_, _, exitCode, err := client.ExecuteOutput(ctx, session.SpriteName, "", nil, "test", "-d", repoPath)
+		if err == nil && exitCode == 0 {
+			// Repo exists - sprite is healthy, reuse it
+			fmt.Printf("Sprite is healthy, resuming on existing Sprite...\n")
+			return repoPath, nil
+		}
+
+		// Repo doesn't exist or check failed - sprite is broken, delete and recreate
+		fmt.Printf("Sprite appears broken, recreating...\n")
+		if err := client.Delete(ctx, session.SpriteName); err != nil {
+			return "", fmt.Errorf("failed to delete broken sprite: %w", err)
+		}
+	}
+
 	// Create Sprite
 	fmt.Printf("Creating Sprite %s...\n", session.SpriteName)
 	if err := client.Create(ctx, session.SpriteName, session.Checkpoint); err != nil {
 		return "", fmt.Errorf("failed to create sprite: %w", err)
 	}
 
-	// Parse repo org/name
-	parts := strings.Split(session.Repo, "/")
-	if len(parts) != 2 {
-		return "", fmt.Errorf("invalid repo format %q, expected org/repo", session.Repo)
+	// Create directory structure: /var/local/wisp/{session,templates,repos}
+	fmt.Printf("Creating directories...\n")
+	if err := syncMgr.EnsureDirectoriesOnSprite(ctx, session.SpriteName); err != nil {
+		return "", fmt.Errorf("failed to create directories: %w", err)
 	}
-	org, repo := parts[0], parts[1]
 
-	// Repo path on Sprite
-	repoPath := filepath.Join("/home/sprite", org, repo)
+	// Get GitHub token for cloning
+	githubToken := env["GITHUB_TOKEN"]
+	if githubToken == "" {
+		githubToken = os.Getenv("GITHUB_TOKEN")
+	}
 
-	// Clone primary repo
+	// Setup git config
+	fmt.Printf("Setting up git config...\n")
+	if err := sprite.SetupGitConfig(ctx, client, session.SpriteName); err != nil {
+		return "", fmt.Errorf("failed to setup git config: %w", err)
+	}
+
+	// Clone primary repo (token embedded in URL for auth)
 	fmt.Printf("Cloning %s...\n", session.Repo)
-	if err := CloneRepo(ctx, client, session.SpriteName, session.Repo, repoPath); err != nil {
+	if err := CloneRepo(ctx, client, session.SpriteName, session.Repo, repoPath, githubToken); err != nil {
 		return "", fmt.Errorf("failed to clone repo: %w", err)
 	}
 
@@ -377,6 +419,12 @@ func SetupSprite(
 		return "", fmt.Errorf("failed to create branch: %w", err)
 	}
 
+	// Copy spec file from local to Sprite
+	fmt.Printf("Copying spec file %s...\n", session.Spec)
+	if err := CopySpecFile(ctx, client, session.SpriteName, localBasePath, session.Spec); err != nil {
+		return "", fmt.Errorf("failed to copy spec file: %w", err)
+	}
+
 	// Clone sibling repos
 	for _, sibling := range session.Siblings {
 		siblingParts := strings.Split(sibling, "/")
@@ -384,10 +432,10 @@ func SetupSprite(
 			return "", fmt.Errorf("invalid sibling repo format %q, expected org/repo", sibling)
 		}
 		siblingOrg, siblingRepo := siblingParts[0], siblingParts[1]
-		siblingPath := filepath.Join("/home/sprite", siblingOrg, siblingRepo)
+		siblingPath := filepath.Join(sprite.ReposDir, siblingOrg, siblingRepo)
 
 		fmt.Printf("Cloning sibling %s...\n", sibling)
-		if err := CloneRepo(ctx, client, session.SpriteName, sibling, siblingPath); err != nil {
+		if err := CloneRepo(ctx, client, session.SpriteName, sibling, siblingPath, githubToken); err != nil {
 			return "", fmt.Errorf("failed to clone sibling %s: %w", sibling, err)
 		}
 	}
@@ -398,10 +446,10 @@ func SetupSprite(
 		return "", fmt.Errorf("failed to copy settings: %w", err)
 	}
 
-	// Copy templates to repo .wisp/
+	// Copy templates to /var/local/wisp/templates/
 	templateDir := filepath.Join(localBasePath, ".wisp", "templates", "default")
 	fmt.Printf("Copying templates...\n")
-	if err := syncMgr.CopyTemplatesToSprite(ctx, session.SpriteName, repoPath, templateDir); err != nil {
+	if err := syncMgr.CopyTemplatesToSprite(ctx, session.SpriteName, templateDir); err != nil {
 		return "", fmt.Errorf("failed to copy templates: %w", err)
 	}
 
@@ -421,28 +469,35 @@ func SetupSprite(
 }
 
 // CloneRepo clones a GitHub repository to the specified path on a Sprite.
+// If githubToken is provided, it's embedded in the clone URL for authentication.
 // Exported for testing.
-func CloneRepo(ctx context.Context, client sprite.Client, spriteName, repo, destPath string) error {
+func CloneRepo(ctx context.Context, client sprite.Client, spriteName, repo, destPath, githubToken string) error {
+	// Remove destination if it exists (handles stale state from previous runs)
+	_, _, _, _ = client.ExecuteOutput(ctx, spriteName, "", nil, "rm", "-rf", destPath)
+
 	// Ensure parent directory exists
 	parentDir := filepath.Dir(destPath)
-	mkdirCmd := fmt.Sprintf("mkdir -p %s", parentDir)
-	cmd, err := client.Execute(ctx, spriteName, "", nil, "bash", "-c", mkdirCmd)
+	_, _, exitCode, err := client.ExecuteOutput(ctx, spriteName, "", nil, "mkdir", "-p", parentDir)
 	if err != nil {
 		return fmt.Errorf("failed to create parent directory: %w", err)
 	}
-	if err := cmd.Wait(); err != nil {
-		return fmt.Errorf("failed to create parent directory: %w", err)
+	if exitCode != 0 {
+		return fmt.Errorf("mkdir failed with exit code %d", exitCode)
 	}
 
-	// Clone repository
-	cloneURL := fmt.Sprintf("https://github.com/%s.git", repo)
-	cloneCmd := fmt.Sprintf("git clone %s %s", cloneURL, destPath)
-	cmd, err = client.Execute(ctx, spriteName, "", nil, "bash", "-c", cloneCmd)
-	if err != nil {
-		return fmt.Errorf("failed to start git clone: %w", err)
+	// Clone repository - embed token in URL if provided
+	var cloneURL string
+	if githubToken != "" {
+		cloneURL = fmt.Sprintf("https://x-access-token:%s@github.com/%s.git", githubToken, repo)
+	} else {
+		cloneURL = fmt.Sprintf("https://github.com/%s.git", repo)
 	}
-	if err := cmd.Wait(); err != nil {
-		return fmt.Errorf("git clone failed: %w", err)
+	_, stderr, exitCode, err := client.ExecuteOutput(ctx, spriteName, "", nil, "git", "clone", cloneURL, destPath)
+	if err != nil {
+		return fmt.Errorf("failed to run git clone: %w", err)
+	}
+	if exitCode != 0 {
+		return fmt.Errorf("git clone failed with exit code %d: %s", exitCode, string(stderr))
 	}
 
 	return nil
@@ -451,20 +506,40 @@ func CloneRepo(ctx context.Context, client sprite.Client, spriteName, repo, dest
 // CreateBranch creates and checks out a new branch in a repository on a Sprite.
 // Exported for testing.
 func CreateBranch(ctx context.Context, client sprite.Client, spriteName, repoPath, branch string) error {
-	// Create and checkout branch (or checkout if it exists)
-	branchCmd := fmt.Sprintf("git checkout -B %s", branch)
-	cmd, err := client.Execute(ctx, spriteName, repoPath, nil, "bash", "-c", branchCmd)
+	_, stderr, exitCode, err := client.ExecuteOutput(ctx, spriteName, repoPath, nil, "git", "checkout", "-B", branch)
 	if err != nil {
-		return fmt.Errorf("failed to start branch creation: %w", err)
+		return fmt.Errorf("failed to run git checkout: %w", err)
 	}
-	if err := cmd.Wait(); err != nil {
-		return fmt.Errorf("branch creation failed: %w", err)
+	if exitCode != 0 {
+		return fmt.Errorf("git checkout failed with exit code %d: %s", exitCode, string(stderr))
+	}
+
+	return nil
+}
+
+// RemoteSpecPath is the known location for the spec file on the Sprite.
+var RemoteSpecPath = filepath.Join(sprite.SessionDir, "spec.md")
+
+// CopySpecFile copies the local spec file to a known location on the Sprite.
+// Exported for testing.
+func CopySpecFile(ctx context.Context, client sprite.Client, spriteName, localBasePath, specPath string) error {
+	// Read local spec file
+	localSpecPath := filepath.Join(localBasePath, specPath)
+	content, err := os.ReadFile(localSpecPath)
+	if err != nil {
+		return fmt.Errorf("failed to read local spec file %s: %w", localSpecPath, err)
+	}
+
+	// Write to known location
+	if err := client.WriteFile(ctx, spriteName, RemoteSpecPath, content); err != nil {
+		return fmt.Errorf("failed to write spec file to sprite: %w", err)
 	}
 
 	return nil
 }
 
 // InjectEnvVars writes environment variables to a Sprite's shell profile (.bashrc).
+// The file is written to /var/local/wisp/.bashrc (our HOME directory on Sprites).
 // Exported for testing.
 func InjectEnvVars(ctx context.Context, client sprite.Client, spriteName string, env map[string]string) error {
 	if len(env) == 0 {
@@ -479,9 +554,10 @@ func InjectEnvVars(ctx context.Context, client sprite.Client, spriteName string,
 		exports = append(exports, fmt.Sprintf("export %s='%s'", key, escapedValue))
 	}
 
-	// Write to .bashrc
+	// Write to .bashrc in our HOME directory
+	bashrcPath := filepath.Join(sprite.WispHome, ".bashrc")
 	content := strings.Join(exports, "\n") + "\n"
-	if err := client.WriteFile(ctx, spriteName, "/home/sprite/.bashrc", []byte(content)); err != nil {
+	if err := client.WriteFile(ctx, spriteName, bashrcPath, []byte(content)); err != nil {
 		return fmt.Errorf("failed to write .bashrc: %w", err)
 	}
 
@@ -491,30 +567,9 @@ func InjectEnvVars(ctx context.Context, client sprite.Client, spriteName string,
 // RunCreateTasksPrompt runs Claude with the create-tasks prompt to generate tasks.json.
 // Exported for testing.
 func RunCreateTasksPrompt(ctx context.Context, client sprite.Client, session *config.Session, repoPath string) error {
-	wispPath := filepath.Join(repoPath, ".wisp")
-	createTasksPath := filepath.Join(wispPath, "create-tasks.md")
-	contextPath := filepath.Join(wispPath, "context.md")
-	specPath := filepath.Join(repoPath, session.Spec)
+	createTasksPath := filepath.Join(sprite.TemplatesDir, "create-tasks.md")
+	contextPath := filepath.Join(sprite.TemplatesDir, "context.md")
 
-	// Build Claude command
-	// The create-tasks prompt tells Claude to read the RFC and generate tasks
-	args := []string{
-		"bash", "-c",
-		fmt.Sprintf(
-			"source ~/.bashrc && claude -p \"$(cat %s)\n\nRFC path: %s\" --append-system-prompt-file %s --dangerously-skip-permissions --output-format stream-json --max-turns 50",
-			createTasksPath, specPath, contextPath,
-		),
-	}
-
-	cmd, err := client.Execute(ctx, session.SpriteName, repoPath, nil, args...)
-	if err != nil {
-		return fmt.Errorf("failed to start claude: %w", err)
-	}
-
-	// Wait for completion (we don't stream this output)
-	if err := cmd.Wait(); err != nil {
-		return fmt.Errorf("claude create-tasks failed: %w", err)
-	}
-
-	return nil
+	return sprite.RunTasksPrompt(ctx, client, session.SpriteName, repoPath,
+		createTasksPath, "RFC path: "+RemoteSpecPath, contextPath, 50)
 }

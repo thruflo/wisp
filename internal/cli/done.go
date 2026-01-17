@@ -263,13 +263,12 @@ func syncDivergenceFromSprite(ctx context.Context, client sprite.Client, spriteN
 
 // pushBranchOnSprite pushes the current branch to remote via the Sprite.
 func pushBranchOnSprite(ctx context.Context, client sprite.Client, spriteName, repoPath, branch string) error {
-	cmd, err := client.Execute(ctx, spriteName, repoPath, nil, "git", "push", "-u", "origin", branch)
+	_, stderr, exitCode, err := client.ExecuteOutput(ctx, spriteName, repoPath, nil, "git", "push", "-u", "origin", branch)
 	if err != nil {
 		return fmt.Errorf("failed to execute push: %w", err)
 	}
-
-	if err := cmd.Wait(); err != nil {
-		return fmt.Errorf("push failed: %w", err)
+	if exitCode != 0 {
+		return fmt.Errorf("push failed with exit code %d: %s", exitCode, string(stderr))
 	}
 
 	return nil
@@ -318,7 +317,7 @@ func createPROnSprite(ctx context.Context, client sprite.Client, spriteName, rep
 	}
 
 	// Run gh pr create
-	cmd, err := client.Execute(ctx, spriteName, repoPath, cmdEnv,
+	stdout, stderr, exitCode, err := client.ExecuteOutput(ctx, spriteName, repoPath, cmdEnv,
 		"gh", "pr", "create",
 		"--title", title,
 		"--body", body,
@@ -326,25 +325,11 @@ func createPROnSprite(ctx context.Context, client sprite.Client, spriteName, rep
 	if err != nil {
 		return "", fmt.Errorf("failed to execute gh pr create: %w", err)
 	}
-
-	// Read stdout for PR URL
-	var output strings.Builder
-	buf := make([]byte, 1024)
-	for {
-		n, err := cmd.Stdout.Read(buf)
-		if n > 0 {
-			output.Write(buf[:n])
-		}
-		if err != nil {
-			break
-		}
+	if exitCode != 0 {
+		return "", fmt.Errorf("gh pr create failed with exit code %d: %s", exitCode, string(stderr))
 	}
 
-	if err := cmd.Wait(); err != nil {
-		return "", fmt.Errorf("gh pr create failed: %w", err)
-	}
-
-	prURL := strings.TrimSpace(output.String())
+	prURL := strings.TrimSpace(string(stdout))
 	return prURL, nil
 }
 

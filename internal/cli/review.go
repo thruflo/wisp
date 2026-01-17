@@ -208,29 +208,9 @@ func runReview(cmd *cobra.Command, args []string) error {
 
 // runReviewTasksPrompt runs Claude with the review-tasks prompt.
 func runReviewTasksPrompt(ctx context.Context, client sprite.Client, session *config.Session, repoPath, feedbackPath string) error {
-	wispPath := filepath.Join(repoPath, ".wisp")
-	reviewTasksPath := filepath.Join(wispPath, "review-tasks.md")
-	contextPath := filepath.Join(wispPath, "context.md")
+	reviewTasksPath := filepath.Join(sprite.TemplatesDir, "review-tasks.md")
+	contextPath := filepath.Join(sprite.TemplatesDir, "context.md")
 
-	// Build Claude command
-	// The review-tasks prompt tells Claude to read the feedback and generate/update tasks
-	args := []string{
-		"bash", "-c",
-		fmt.Sprintf(
-			"source ~/.bashrc && claude -p \"$(cat %s)\n\nFeedback path: %s\" --append-system-prompt-file %s --dangerously-skip-permissions --output-format stream-json --max-turns 50",
-			reviewTasksPath, feedbackPath, contextPath,
-		),
-	}
-
-	cmd, err := client.Execute(ctx, session.SpriteName, repoPath, nil, args...)
-	if err != nil {
-		return fmt.Errorf("failed to start claude: %w", err)
-	}
-
-	// Wait for completion (we don't stream this output)
-	if err := cmd.Wait(); err != nil {
-		return fmt.Errorf("claude review-tasks failed: %w", err)
-	}
-
-	return nil
+	return sprite.RunTasksPrompt(ctx, client, session.SpriteName, repoPath,
+		reviewTasksPath, "Feedback path: "+feedbackPath, contextPath, 50)
 }

@@ -386,29 +386,9 @@ func computeLineDiff(old, new []string) []string {
 
 // runUpdateTasksPrompt runs Claude with the update-tasks prompt.
 func runUpdateTasksPrompt(ctx context.Context, client sprite.Client, session *config.Session, repoPath, diffPath string) error {
-	wispPath := filepath.Join(repoPath, ".wisp")
-	updateTasksPath := filepath.Join(wispPath, "update-tasks.md")
-	contextPath := filepath.Join(wispPath, "context.md")
+	updateTasksPath := filepath.Join(sprite.TemplatesDir, "update-tasks.md")
+	contextPath := filepath.Join(sprite.TemplatesDir, "context.md")
 
-	// Build Claude command
-	// The update-tasks prompt tells Claude to read the diff and update tasks
-	args := []string{
-		"bash", "-c",
-		fmt.Sprintf(
-			"source ~/.bashrc && claude -p \"$(cat %s)\n\nRFC diff path: %s\" --append-system-prompt-file %s --dangerously-skip-permissions --output-format stream-json --max-turns 50",
-			updateTasksPath, diffPath, contextPath,
-		),
-	}
-
-	cmd, err := client.Execute(ctx, session.SpriteName, repoPath, nil, args...)
-	if err != nil {
-		return fmt.Errorf("failed to start claude: %w", err)
-	}
-
-	// Wait for completion (we don't stream this output)
-	if err := cmd.Wait(); err != nil {
-		return fmt.Errorf("claude update-tasks failed: %w", err)
-	}
-
-	return nil
+	return sprite.RunTasksPrompt(ctx, client, session.SpriteName, repoPath,
+		updateTasksPath, "RFC diff path: "+diffPath, contextPath, 50)
 }
