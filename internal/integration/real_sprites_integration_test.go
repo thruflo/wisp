@@ -222,6 +222,8 @@ func TestRealSprite_StateFileRoundTrip(t *testing.T) {
 }
 
 // TestRealSprite_SyncManagerIntegration tests the full SyncManager round-trip with a real Sprite.
+// This test exercises the production SyncManager code paths for syncing state, tasks, and history
+// between local storage and a Sprite.
 func TestRealSprite_SyncManagerIntegration(t *testing.T) {
 	env := testutil.SetupRealSpriteEnv(t)
 
@@ -239,22 +241,23 @@ func TestRealSprite_SyncManagerIntegration(t *testing.T) {
 	err := env.Client.Create(ctx, spriteName, "")
 	require.NoError(t, err, "failed to create Sprite")
 
-	// Create test directory structure on Sprite
-	repoPath := "/tmp/test-repo"
-	cmd, err := env.Client.Execute(ctx, spriteName, "", nil, "mkdir", "-p", repoPath+"/.wisp")
-	require.NoError(t, err)
-	require.NoError(t, cmd.Wait())
+	// Register with cleanup registry for global cleanup in case test cleanup fails
+	testutil.RegisterSprite(spriteName)
 
 	// Create local test environment
 	tmpDir := t.TempDir()
-	wispDir := filepath.Join(tmpDir, ".wisp", "sessions", "test-branch")
-	require.NoError(t, os.MkdirAll(wispDir, 0755))
-
-	// Create local store and SyncManager
 	store := state.NewStore(tmpDir)
 	syncMgr := state.NewSyncManager(env.Client, store)
 
+	// Create test directory structure on Sprite using production SyncManager method
+	repoPath := "/tmp/test-repo"
+	err = syncMgr.EnsureWispDirOnSprite(ctx, spriteName, repoPath)
+	require.NoError(t, err, "failed to create .wisp directory on Sprite")
+
+	// Create local session directory for the branch
 	branch := "test-branch"
+	wispDir := filepath.Join(tmpDir, ".wisp", "sessions", branch)
+	require.NoError(t, os.MkdirAll(wispDir, 0755))
 
 	// Create and save local state
 	localState := &state.State{
