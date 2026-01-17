@@ -83,7 +83,7 @@ type ClaudeConfig struct {
 // DefaultClaudeConfig returns production defaults for Claude execution.
 func DefaultClaudeConfig() ClaudeConfig {
 	return ClaudeConfig{
-		MaxTurns:     100,
+		MaxTurns:     200,
 		MaxBudget:    0, // No limit by default; use config.Limits.MaxBudgetUSD for session budget
 		Verbose:      true,
 		OutputFormat: "stream-json",

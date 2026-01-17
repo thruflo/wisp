@@ -68,7 +68,7 @@
     "description": "Make Claude command building configurable via ClaudeConfig",
     "steps": [
       "Create ClaudeConfig struct with MaxTurns, MaxBudget, Verbose, OutputFormat fields",
-      "Add DefaultClaudeConfig function returning production defaults (MaxTurns: 100, Verbose: true, etc.)",
+      "Add DefaultClaudeConfig function returning production defaults (MaxTurns: 200, Verbose: true, etc.)",
       "Refactor Loop to accept ClaudeConfig as part of LoopOptions",
       "Update Claude command building to use ClaudeConfig values",
       "Add unit tests for ClaudeConfig and command building"

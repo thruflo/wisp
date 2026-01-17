@@ -436,7 +436,7 @@ func TestParseStreamJSON(t *testing.T) {
 func TestDefaultClaudeConfig(t *testing.T) {
 	cfg := DefaultClaudeConfig()
 
-	assert.Equal(t, 100, cfg.MaxTurns, "MaxTurns should be 100")
+	assert.Equal(t, 200, cfg.MaxTurns, "MaxTurns should be 200")
 	assert.Equal(t, float64(0), cfg.MaxBudget, "MaxBudget should be 0 (no limit)")
 	assert.True(t, cfg.Verbose, "Verbose should be true")
 	assert.Equal(t, "stream-json", cfg.OutputFormat, "OutputFormat should be stream-json")
@@ -527,7 +527,7 @@ func TestBuildClaudeArgsWithCustomClaudeConfig(t *testing.T) {
 			},
 			repoPath: "/var/local/wisp/repos/org/repo",
 			claudeCfg: ClaudeConfig{
-				MaxTurns:     100,
+				MaxTurns:     200,
 				MaxBudget:    5.0, // ClaudeConfig budget takes precedence
 				Verbose:      true,
 				OutputFormat: "stream-json",
@@ -547,7 +547,7 @@ func TestBuildClaudeArgsWithCustomClaudeConfig(t *testing.T) {
 			cfg:      &config.Config{},
 			repoPath: "/var/local/wisp/repos/org/repo",
 			claudeCfg: ClaudeConfig{
-				MaxTurns:     100,
+				MaxTurns:     200,
 				Verbose:      false,
 				OutputFormat: "stream-json",
 			},
@@ -602,7 +602,7 @@ func TestBuildClaudeArgsWithCustomClaudeConfig(t *testing.T) {
 			cfg:      &config.Config{},
 			repoPath: "/var/local/wisp/repos/org/repo",
 			claudeCfg: ClaudeConfig{
-				MaxTurns:     100,
+				MaxTurns:     200,
 				Verbose:      true,
 				OutputFormat: "",
 			},
@@ -1136,7 +1136,7 @@ func TestNewLoopWithOptions(t *testing.T) {
 		loop := NewLoopWithOptions(opts)
 
 		// Should use production defaults
-		assert.Equal(t, 100, loop.claudeCfg.MaxTurns)
+		assert.Equal(t, 200, loop.claudeCfg.MaxTurns)
 		assert.True(t, loop.claudeCfg.Verbose)
 		assert.Equal(t, "stream-json", loop.claudeCfg.OutputFormat)
 	})

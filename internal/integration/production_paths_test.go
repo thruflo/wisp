@@ -37,8 +37,8 @@ func TestRealSprite_LoopUsesProductionClaudeArgs(t *testing.T) {
 	defaultCfg := loop.DefaultClaudeConfig()
 
 	// Production defaults from loop.go
-	assert.Equal(t, 100, defaultCfg.MaxTurns,
-		"Production MaxTurns should be 100")
+	assert.Equal(t, 200, defaultCfg.MaxTurns,
+		"Production MaxTurns should be 200")
 	assert.Equal(t, float64(0), defaultCfg.MaxBudget,
 		"Production MaxBudget should be 0 (unlimited, uses config.Limits instead)")
 	assert.True(t, defaultCfg.Verbose,
@@ -247,7 +247,7 @@ func TestRealSprite_ProductionDefaultsUsed(t *testing.T) {
 
 		// These values are documented in the spec and must not change
 		// without updating production behavior
-		assert.Equal(t, 100, cfg.MaxTurns, "MaxTurns should default to 100")
+		assert.Equal(t, 200, cfg.MaxTurns, "MaxTurns should default to 200")
 		assert.Equal(t, float64(0), cfg.MaxBudget, "MaxBudget should default to 0 (uses config.Limits)")
 		assert.True(t, cfg.Verbose, "Verbose should default to true")
 		assert.Equal(t, "stream-json", cfg.OutputFormat, "OutputFormat should default to stream-json")
