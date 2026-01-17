@@ -492,3 +492,195 @@ func TestIsValidationError(t *testing.T) {
 	assert.True(t, IsValidationError(ve))
 	assert.False(t, IsValidationError(os.ErrNotExist))
 }
+
+func TestLoadConfig_WithServerConfig(t *testing.T) {
+	t.Parallel()
+
+	tmpDir := t.TempDir()
+	wispDir := filepath.Join(tmpDir, ".wisp")
+	require.NoError(t, os.MkdirAll(wispDir, 0o755))
+
+	configContent := `limits:
+  max_iterations: 50
+  max_budget_usd: 20
+  max_duration_hours: 4
+  no_progress_threshold: 3
+server:
+  port: 9000
+  password_hash: "$argon2id$v=19$m=65536,t=3,p=4$testsalt$testhash"
+`
+	require.NoError(t, os.WriteFile(filepath.Join(wispDir, "config.yaml"), []byte(configContent), 0o644))
+
+	cfg, err := LoadConfig(tmpDir)
+	require.NoError(t, err)
+
+	require.NotNil(t, cfg.Server)
+	assert.Equal(t, 9000, cfg.Server.Port)
+	assert.Equal(t, "$argon2id$v=19$m=65536,t=3,p=4$testsalt$testhash", cfg.Server.PasswordHash)
+}
+
+func TestLoadConfig_ServerConfigOptional(t *testing.T) {
+	t.Parallel()
+
+	tmpDir := t.TempDir()
+	wispDir := filepath.Join(tmpDir, ".wisp")
+	require.NoError(t, os.MkdirAll(wispDir, 0o755))
+
+	// Config without server section
+	configContent := `limits:
+  max_iterations: 50
+  max_budget_usd: 20
+  max_duration_hours: 4
+  no_progress_threshold: 3
+`
+	require.NoError(t, os.WriteFile(filepath.Join(wispDir, "config.yaml"), []byte(configContent), 0o644))
+
+	cfg, err := LoadConfig(tmpDir)
+	require.NoError(t, err)
+
+	// Server should be nil when not configured
+	assert.Nil(t, cfg.Server)
+}
+
+func TestLoadConfig_ServerConfigPartial(t *testing.T) {
+	t.Parallel()
+
+	tmpDir := t.TempDir()
+	wispDir := filepath.Join(tmpDir, ".wisp")
+	require.NoError(t, os.MkdirAll(wispDir, 0o755))
+
+	// Config with only port set
+	configContent := `limits:
+  max_iterations: 50
+  max_budget_usd: 20
+  max_duration_hours: 4
+  no_progress_threshold: 3
+server:
+  port: 8080
+`
+	require.NoError(t, os.WriteFile(filepath.Join(wispDir, "config.yaml"), []byte(configContent), 0o644))
+
+	cfg, err := LoadConfig(tmpDir)
+	require.NoError(t, err)
+
+	require.NotNil(t, cfg.Server)
+	assert.Equal(t, 8080, cfg.Server.Port)
+	assert.Empty(t, cfg.Server.PasswordHash)
+}
+
+func TestLoadConfig_ServerConfigValidationError(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		content string
+		field   string
+	}{
+		{
+			name: "invalid port negative",
+			content: `limits:
+  max_iterations: 50
+  max_budget_usd: 20
+  max_duration_hours: 4
+  no_progress_threshold: 3
+server:
+  port: -1
+`,
+			field: "server.port",
+		},
+		{
+			name: "invalid port too high",
+			content: `limits:
+  max_iterations: 50
+  max_budget_usd: 20
+  max_duration_hours: 4
+  no_progress_threshold: 3
+server:
+  port: 65536
+`,
+			field: "server.port",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			tmpDir := t.TempDir()
+			wispDir := filepath.Join(tmpDir, ".wisp")
+			require.NoError(t, os.MkdirAll(wispDir, 0o755))
+			require.NoError(t, os.WriteFile(filepath.Join(wispDir, "config.yaml"), []byte(tt.content), 0o644))
+
+			_, err := LoadConfig(tmpDir)
+			require.Error(t, err)
+			assert.True(t, IsValidationError(err))
+
+			var ve ValidationError
+			require.ErrorAs(t, err, &ve)
+			assert.Equal(t, tt.field, ve.Field)
+		})
+	}
+}
+
+func TestDefaultServerConfig(t *testing.T) {
+	t.Parallel()
+
+	cfg := DefaultServerConfig()
+	assert.Equal(t, DefaultServerPort, cfg.Port)
+	assert.Empty(t, cfg.PasswordHash)
+}
+
+func TestValidateServerConfig(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		config  *ServerConfig
+		wantErr bool
+		field   string
+	}{
+		{
+			name:    "valid default port",
+			config:  &ServerConfig{Port: 8374},
+			wantErr: false,
+		},
+		{
+			name:    "valid port 0 (dynamic)",
+			config:  &ServerConfig{Port: 0},
+			wantErr: false,
+		},
+		{
+			name:    "valid max port",
+			config:  &ServerConfig{Port: 65535},
+			wantErr: false,
+		},
+		{
+			name:    "invalid negative port",
+			config:  &ServerConfig{Port: -1},
+			wantErr: true,
+			field:   "server.port",
+		},
+		{
+			name:    "invalid port too high",
+			config:  &ServerConfig{Port: 65536},
+			wantErr: true,
+			field:   "server.port",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			err := ValidateServerConfig(tt.config)
+			if tt.wantErr {
+				require.Error(t, err)
+				var ve ValidationError
+				require.ErrorAs(t, err, &ve)
+				assert.Equal(t, tt.field, ve.Field)
+				return
+			}
+			assert.NoError(t, err)
+		})
+	}
+}
