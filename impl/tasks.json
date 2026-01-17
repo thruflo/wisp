@@ -109,7 +109,7 @@
       "Add deadline-aware context creation in long-running tests",
       "Verify tests respect timeouts during CI runs"
     ],
-    "passes": false
+    "passes": true
   },
   {
     "category": "test",
@@ -122,7 +122,7 @@
       "Use production SyncManager methods exactly as production code does",
       "Verify test still exercises the same scenarios"
     ],
-    "passes": false
+    "passes": true
   },
   {
     "category": "test",
@@ -135,7 +135,7 @@
       "Verify Claude command uses production args structure",
       "Update assertions to match production behavior"
     ],
-    "passes": false
+    "passes": true
   },
   {
     "category": "test",
@@ -148,7 +148,7 @@
       "Verify production history recording works",
       "Add assertions for all synced files (state.json, tasks.json, history.json)"
     ],
-    "passes": false
+    "passes": true
   },
   {
     "category": "test",
@@ -160,7 +160,7 @@
       "Add test to verify production error handling paths",
       "Tag tests with real_sprites and integration build tags"
     ],
-    "passes": false
+    "passes": true
   },
   {
     "category": "feature",
