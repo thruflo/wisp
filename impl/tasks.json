@@ -85,7 +85,7 @@
       "Implement CleanupAllSprites function to delete all registered sprites",
       "Add unit tests for the cleanup registry"
     ],
-    "passes": false
+    "passes": true
   },
   {
     "category": "test",
@@ -97,7 +97,7 @@
       "Call CleanupAllSprites after all tests complete",
       "Log warnings for any cleanup failures"
     ],
-    "passes": false
+    "passes": true
   },
   {
     "category": "test",
