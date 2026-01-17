@@ -65,6 +65,15 @@ func (m *MockSpriteClient) Execute(ctx context.Context, name string, dir string,
 	return NewMockCmd("", nil).ToSpriteCmd(), nil
 }
 
+func (m *MockSpriteClient) ExecuteOutput(ctx context.Context, name string, dir string, env []string, args ...string) (stdout, stderr []byte, exitCode int, err error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.executeErr != nil {
+		return nil, nil, -1, m.executeErr
+	}
+	return nil, nil, 0, nil
+}
+
 func (m *MockSpriteClient) WriteFile(ctx context.Context, name string, path string, content []byte) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -405,6 +414,7 @@ func TestBuildClaudeArgs(t *testing.T) {
 	// Check required flags
 	assert.Contains(t, args, "claude")
 	assert.Contains(t, args, "--dangerously-skip-permissions")
+	assert.Contains(t, args, "--verbose") // required when using -p with --output-format stream-json
 	assert.Contains(t, args, "--output-format")
 	assert.Contains(t, args, "stream-json")
 	assert.Contains(t, args, "--max-turns")
@@ -878,4 +888,206 @@ func TestNeedsInputStatusTransitions(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestNewLoopWithOptions tests the LoopOptions constructor.
+func TestNewLoopWithOptions(t *testing.T) {
+	t.Parallel()
+
+	tmpDir := t.TempDir()
+	store := state.NewStore(tmpDir)
+	mockClient := NewMockSpriteClient()
+	syncMgr := state.NewSyncManager(mockClient, store)
+	mockTUI := tui.NewTUI(io.Discard)
+
+	cfg := &config.Config{
+		Limits: config.Limits{
+			MaxIterations:    50,
+			MaxBudgetUSD:     25.0,
+			MaxDurationHours: 2.0,
+		},
+	}
+	session := &config.Session{
+		Repo:       "test-org/test-repo",
+		Branch:     "feature-branch",
+		SpriteName: "wisp-test-123",
+	}
+
+	t.Run("creates Loop with all options", func(t *testing.T) {
+		opts := LoopOptions{
+			Client:      mockClient,
+			SyncManager: syncMgr,
+			Store:       store,
+			Config:      cfg,
+			Session:     session,
+			TUI:         mockTUI,
+			RepoPath:    "/home/sprite/test-org/test-repo",
+			TemplateDir: "/path/to/templates",
+		}
+
+		loop := NewLoopWithOptions(opts)
+
+		assert.NotNil(t, loop)
+		assert.Equal(t, "/home/sprite/test-org/test-repo", loop.repoPath)
+		assert.Equal(t, "/home/sprite/test-org/test-repo/.wisp", loop.wispPath)
+		assert.Equal(t, "/path/to/templates", loop.templateDir)
+	})
+
+	t.Run("StartTime is injected", func(t *testing.T) {
+		injectedTime := time.Date(2024, 1, 15, 10, 30, 0, 0, time.UTC)
+
+		opts := LoopOptions{
+			Client:      mockClient,
+			SyncManager: syncMgr,
+			Store:       store,
+			Config:      cfg,
+			Session:     session,
+			TUI:         mockTUI,
+			RepoPath:    "/home/sprite/test-org/test-repo",
+			StartTime:   injectedTime,
+		}
+
+		loop := NewLoopWithOptions(opts)
+
+		assert.Equal(t, injectedTime, loop.startTime)
+	})
+
+	t.Run("zero StartTime allows Run to set current time", func(t *testing.T) {
+		opts := LoopOptions{
+			Client:      mockClient,
+			SyncManager: syncMgr,
+			Store:       store,
+			Config:      cfg,
+			Session:     session,
+			TUI:         mockTUI,
+			RepoPath:    "/home/sprite/test-org/test-repo",
+			// StartTime not set (zero value)
+		}
+
+		loop := NewLoopWithOptions(opts)
+		assert.True(t, loop.startTime.IsZero())
+	})
+}
+
+// TestNewLoopUsesOptions tests that NewLoop correctly uses NewLoopWithOptions internally.
+func TestNewLoopUsesOptions(t *testing.T) {
+	t.Parallel()
+
+	tmpDir := t.TempDir()
+	store := state.NewStore(tmpDir)
+	mockClient := NewMockSpriteClient()
+	syncMgr := state.NewSyncManager(mockClient, store)
+	mockTUI := tui.NewTUI(io.Discard)
+
+	cfg := &config.Config{
+		Limits: config.Limits{
+			MaxIterations: 100,
+		},
+	}
+	session := &config.Session{
+		Branch: "test-branch",
+	}
+
+	loop := NewLoop(
+		mockClient,
+		syncMgr,
+		store,
+		cfg,
+		session,
+		mockTUI,
+		"/home/sprite/org/repo",
+		"/templates",
+	)
+
+	assert.NotNil(t, loop)
+	assert.Equal(t, "/home/sprite/org/repo", loop.repoPath)
+	assert.Equal(t, "/home/sprite/org/repo/.wisp", loop.wispPath)
+	assert.Equal(t, "/templates", loop.templateDir)
+	// StartTime should be zero when using NewLoop (not injected)
+	assert.True(t, loop.startTime.IsZero())
+}
+
+// TestLoopRunWithInjectedStartTime tests that injected StartTime is used for duration checks.
+func TestLoopRunWithInjectedStartTime(t *testing.T) {
+	t.Parallel()
+
+	tmpDir := t.TempDir()
+	store := state.NewStore(tmpDir)
+	branch := "test-branch"
+
+	session := &config.Session{
+		Repo:       "org/repo",
+		Branch:     branch,
+		SpriteName: "wisp-test",
+	}
+	require.NoError(t, store.CreateSession(session))
+
+	// Create initial state and tasks
+	initialState := &state.State{Status: state.StatusContinue}
+	require.NoError(t, store.SaveState(branch, initialState))
+	tasks := []state.Task{{Description: "Task 1", Passes: false}}
+	require.NoError(t, store.SaveTasks(branch, tasks))
+
+	mockClient := NewMockSpriteClient()
+	stateData, _ := json.Marshal(&state.State{Status: state.StatusContinue, Summary: "Working"})
+	mockClient.SetFile("/home/sprite/org/repo/.wisp/state.json", stateData)
+
+	syncMgr := state.NewSyncManager(mockClient, store)
+	mockTUI := tui.NewTUI(io.Discard)
+
+	// Set max duration to 1 hour
+	cfg := &config.Config{
+		Limits: config.Limits{
+			MaxIterations:       100,
+			MaxDurationHours:    1.0,
+			NoProgressThreshold: 100,
+		},
+	}
+
+	t.Run("exceeds duration limit with injected past time", func(t *testing.T) {
+		// Inject a start time 2 hours in the past
+		pastTime := time.Now().Add(-2 * time.Hour)
+
+		loop := NewLoopWithOptions(LoopOptions{
+			Client:      mockClient,
+			SyncManager: syncMgr,
+			Store:       store,
+			Config:      cfg,
+			Session:     session,
+			TUI:         mockTUI,
+			RepoPath:    "/home/sprite/org/repo",
+			StartTime:   pastTime,
+		})
+
+		ctx := context.Background()
+		result := loop.Run(ctx)
+
+		// Should exit due to max duration (since we started "2 hours ago")
+		assert.Equal(t, ExitReasonMaxDuration, result.Reason)
+	})
+
+	t.Run("within duration limit with injected recent time", func(t *testing.T) {
+		// Inject a start time 30 minutes in the past (within 1 hour limit)
+		recentTime := time.Now().Add(-30 * time.Minute)
+
+		loop := NewLoopWithOptions(LoopOptions{
+			Client:      mockClient,
+			SyncManager: syncMgr,
+			Store:       store,
+			Config:      cfg,
+			Session:     session,
+			TUI:         mockTUI,
+			RepoPath:    "/home/sprite/org/repo",
+			StartTime:   recentTime,
+		})
+
+		// Use a cancelled context to avoid running actual iterations
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+
+		result := loop.Run(ctx)
+
+		// Should exit due to context cancellation, not duration
+		assert.Equal(t, ExitReasonBackground, result.Reason)
+	})
 }

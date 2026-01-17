@@ -85,6 +85,20 @@ type Loop struct {
 	templateDir string // Local path to templates
 }
 
+// LoopOptions holds configuration for creating a Loop instance.
+// This struct enables test-friendly construction with explicit dependencies.
+type LoopOptions struct {
+	Client      sprite.Client
+	SyncManager *state.SyncManager
+	Store       *state.Store
+	Config      *config.Config
+	Session     *config.Session
+	TUI         *tui.TUI
+	RepoPath    string
+	TemplateDir string
+	StartTime   time.Time // Optional: for deterministic time-based testing
+}
+
 // NewLoop creates a new Loop instance.
 func NewLoop(
 	client sprite.Client,
@@ -96,23 +110,42 @@ func NewLoop(
 	repoPath string,
 	templateDir string,
 ) *Loop {
+	return NewLoopWithOptions(LoopOptions{
+		Client:      client,
+		SyncManager: syncMgr,
+		Store:       store,
+		Config:      cfg,
+		Session:     session,
+		TUI:         t,
+		RepoPath:    repoPath,
+		TemplateDir: templateDir,
+	})
+}
+
+// NewLoopWithOptions creates a Loop with explicit options.
+// This allows tests to inject dependencies and control behavior.
+func NewLoopWithOptions(opts LoopOptions) *Loop {
 	return &Loop{
-		client:      client,
-		sync:        syncMgr,
-		store:       store,
-		cfg:         cfg,
-		session:     session,
-		tui:         t,
-		repoPath:    repoPath,
-		wispPath:    filepath.Join(repoPath, ".wisp"),
-		templateDir: templateDir,
+		client:      opts.Client,
+		sync:        opts.SyncManager,
+		store:       opts.Store,
+		cfg:         opts.Config,
+		session:     opts.Session,
+		tui:         opts.TUI,
+		repoPath:    opts.RepoPath,
+		wispPath:    filepath.Join(opts.RepoPath, ".wisp"),
+		templateDir: opts.TemplateDir,
+		startTime:   opts.StartTime,
 	}
 }
 
 // Run executes the iteration loop until an exit condition is met.
 // It returns a Result indicating why the loop stopped.
 func (l *Loop) Run(ctx context.Context) Result {
-	l.startTime = time.Now()
+	// Use injected start time if set, otherwise use current time
+	if l.startTime.IsZero() {
+		l.startTime = time.Now()
+	}
 	l.iteration = l.getStartingIteration()
 
 	// Main loop
@@ -276,11 +309,13 @@ func (l *Loop) buildClaudeArgs() []string {
 	iteratePath := filepath.Join(l.wispPath, "iterate.md")
 	contextPath := filepath.Join(l.wispPath, "context.md")
 
+	// Note: --verbose is required when using -p with --output-format stream-json
 	args := []string{
 		"claude",
 		"-p", fmt.Sprintf("$(cat %s)", iteratePath),
 		"--append-system-prompt-file", contextPath,
 		"--dangerously-skip-permissions",
+		"--verbose",
 		"--output-format", "stream-json",
 		"--max-turns", "100",
 	}
