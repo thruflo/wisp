@@ -172,7 +172,7 @@ func runStart(cmd *cobra.Command, args []string) error {
 	}
 
 	// Sync initial state from Sprite to local
-	if err := syncMgr.SyncFromSprite(ctx, spriteName, branch, repoPath); err != nil {
+	if err := syncMgr.SyncFromSprite(ctx, spriteName, branch); err != nil {
 		// Non-fatal, tasks might not exist yet
 		fmt.Printf("Warning: failed to sync initial state: %v\n", err)
 	}

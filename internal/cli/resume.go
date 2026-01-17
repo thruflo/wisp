@@ -116,14 +116,14 @@ func runResume(cmd *cobra.Command, args []string) error {
 			return fmt.Errorf("failed to generate tasks: %w", err)
 		}
 		// Sync generated state from Sprite to local
-		if err := syncMgr.SyncFromSprite(ctx, session.SpriteName, branch, repoPath); err != nil {
+		if err := syncMgr.SyncFromSprite(ctx, session.SpriteName, branch); err != nil {
 			fmt.Printf("Warning: failed to sync initial state: %v\n", err)
 		}
 	}
 
 	// Sync local state files to Sprite
 	fmt.Printf("Syncing state to Sprite...\n")
-	if err := syncMgr.SyncToSprite(ctx, session.SpriteName, session.Branch, repoPath); err != nil {
+	if err := syncMgr.SyncToSprite(ctx, session.SpriteName, session.Branch); err != nil {
 		return fmt.Errorf("failed to sync state to sprite: %w", err)
 	}
 
@@ -218,7 +218,7 @@ func setupSpriteForResume(
 		fmt.Printf("Resuming on existing Sprite %s...\n", session.SpriteName)
 
 		// Sync local state to sprite
-		if err := syncMgr.SyncToSprite(ctx, session.SpriteName, session.Branch, repoPath); err != nil {
+		if err := syncMgr.SyncToSprite(ctx, session.SpriteName, session.Branch); err != nil {
 			// State sync failed - sprite may be in bad state, warn but continue
 			fmt.Printf("Warning: failed to sync state to sprite: %v\n", err)
 		}

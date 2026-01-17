@@ -4,8 +4,6 @@ import (
 	"context"
 	"fmt"
 	"os"
-	"path/filepath"
-	"strings"
 
 	"github.com/spf13/cobra"
 	"github.com/thruflo/wisp/internal/config"
@@ -84,19 +82,13 @@ func runStop(cmd *cobra.Command, args []string) error {
 		if err != nil {
 			fmt.Printf("Warning: failed to check Sprite status: %v\n", err)
 		} else if exists {
-			// Calculate repo path on Sprite
-			parts := strings.Split(session.Repo, "/")
-			if len(parts) == 2 {
-				repoPath := filepath.Join("/home/sprite", parts[0], parts[1])
-
-				// Sync state from Sprite to local
-				fmt.Printf("Syncing state from Sprite...\n")
-				syncMgr := state.NewSyncManager(client, store)
-				if err := syncMgr.SyncFromSprite(ctx, session.SpriteName, session.Branch, repoPath); err != nil {
-					fmt.Printf("Warning: failed to sync state: %v\n", err)
-				} else {
-					fmt.Printf("State synced successfully.\n")
-				}
+			// Sync state from Sprite to local
+			fmt.Printf("Syncing state from Sprite...\n")
+			syncMgr := state.NewSyncManager(client, store)
+			if err := syncMgr.SyncFromSprite(ctx, session.SpriteName, session.Branch); err != nil {
+				fmt.Printf("Warning: failed to sync state: %v\n", err)
+			} else {
+				fmt.Printf("State synced successfully.\n")
 			}
 
 			// Teardown Sprite if requested

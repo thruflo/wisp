@@ -125,7 +125,7 @@ func runReview(cmd *cobra.Command, args []string) error {
 
 	// Sync local state files to Sprite
 	fmt.Printf("Syncing state to Sprite...\n")
-	if err := syncMgr.SyncToSprite(ctx, session.SpriteName, session.Branch, repoPath); err != nil {
+	if err := syncMgr.SyncToSprite(ctx, session.SpriteName, session.Branch); err != nil {
 		return fmt.Errorf("failed to sync state to sprite: %w", err)
 	}
 
@@ -143,7 +143,7 @@ func runReview(cmd *cobra.Command, args []string) error {
 	}
 
 	// Sync state from Sprite to local
-	if err := syncMgr.SyncFromSprite(ctx, session.SpriteName, session.Branch, repoPath); err != nil {
+	if err := syncMgr.SyncFromSprite(ctx, session.SpriteName, session.Branch); err != nil {
 		fmt.Printf("Warning: failed to sync state from Sprite: %v\n", err)
 	}
 
