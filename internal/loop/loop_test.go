@@ -74,6 +74,10 @@ func (m *MockSpriteClient) ExecuteOutput(ctx context.Context, name string, dir s
 	return nil, nil, 0, nil
 }
 
+func (m *MockSpriteClient) ExecuteOutputWithRetry(ctx context.Context, name string, dir string, env []string, args ...string) (stdout, stderr []byte, exitCode int, err error) {
+	return m.ExecuteOutput(ctx, name, dir, env, args...)
+}
+
 func (m *MockSpriteClient) WriteFile(ctx context.Context, name string, path string, content []byte) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -329,6 +333,7 @@ func TestProgressRate(t *testing.T) {
 }
 
 // TestParseStreamJSON tests stream-json parsing.
+// Tests the actual Claude --output-format stream-json format.
 func TestParseStreamJSON(t *testing.T) {
 	loop := &Loop{}
 
@@ -348,44 +353,74 @@ func TestParseStreamJSON(t *testing.T) {
 			want:  "plain text line",
 		},
 		{
-			name:  "assistant message",
-			input: `{"type":"assistant","content":"Hello, world!"}`,
-			want:  "Hello, world!",
-		},
-		{
-			name:  "tool use",
-			input: `{"type":"tool_use","tool":"Bash","message":"Running command"}`,
-			want:  "[Bash] Running command",
-		},
-		{
-			name:  "tool result short",
-			input: `{"type":"tool_result","result":"Success"}`,
-			want:  "Success",
-		},
-		{
-			name:  "tool result long",
-			input: `{"type":"tool_result","result":"` + strings.Repeat("x", 300) + `"}`,
-			want:  strings.Repeat("x", 200) + "...",
-		},
-		{
-			name:  "error message",
-			input: `{"type":"error","message":"Something went wrong"}`,
-			want:  "ERROR: Something went wrong",
-		},
-		{
-			name:  "unknown type with content",
-			input: `{"type":"other","content":"Some content"}`,
-			want:  "Some content",
-		},
-		{
-			name:  "unknown type with message",
-			input: `{"type":"other","message":"Some message"}`,
-			want:  "Some message",
-		},
-		{
 			name:  "whitespace input",
 			input: "   ",
 			want:  "",
+		},
+		{
+			name:  "assistant text message",
+			input: `{"type":"assistant","message":{"content":[{"type":"text","text":"Hello, world!"}]}}`,
+			want:  "Hello, world!",
+		},
+		{
+			name:  "assistant tool use - bash",
+			input: `{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Bash","id":"toolu_123","input":{"command":"ls -la"}}]}}`,
+			want:  "[Bash] ls -la",
+		},
+		{
+			name:  "assistant tool use - read",
+			input: `{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Read","id":"toolu_123","input":{"file_path":"/path/to/file.go"}}]}}`,
+			want:  "[Read] /path/to/file.go",
+		},
+		{
+			name:  "assistant tool use - unknown tool",
+			input: `{"type":"assistant","message":{"content":[{"type":"tool_use","name":"CustomTool","id":"toolu_123","input":{"foo":"bar"}}]}}`,
+			want:  "[CustomTool] ",
+		},
+		{
+			name:  "user tool result short",
+			input: `{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"toolu_123","content":"Success"}]}}`,
+			want:  "Success",
+		},
+		{
+			name:  "user tool result long",
+			input: `{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"toolu_123","content":"` + strings.Repeat("x", 300) + `"}]}}`,
+			want:  strings.Repeat("x", 200) + "...",
+		},
+		{
+			name:  "user tool result with cat-n line numbers",
+			input: `{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"toolu_123","content":"     1→line one\n     2→line two\n     3→line three"}]}}`,
+			want:  "line one line two line three",
+		},
+		{
+			name:  "user tool result multiline collapses whitespace",
+			input: `{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"toolu_123","content":"first line\n\n   second line   \n\nthird"}]}}`,
+			want:  "first line second line third",
+		},
+		{
+			name:  "result success",
+			input: `{"type":"result","subtype":"success","session_id":"abc123","cost_usd":1.50}`,
+			want:  "[Session completed]",
+		},
+		{
+			name:  "result other",
+			input: `{"type":"result","subtype":"error"}`,
+			want:  "[Result: error]",
+		},
+		{
+			name:  "system init",
+			input: `{"type":"system","subtype":"init","session_id":"abc123"}`,
+			want:  "[Session started]",
+		},
+		{
+			name:  "unknown type",
+			input: `{"type":"unknown_type"}`,
+			want:  "",
+		},
+		{
+			name:  "multiple content items",
+			input: `{"type":"assistant","message":{"content":[{"type":"text","text":"First"},{"type":"text","text":"Second"}]}}`,
+			want:  "First\nSecond",
 		},
 	}
 

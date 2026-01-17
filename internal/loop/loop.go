@@ -403,16 +403,37 @@ func (l *Loop) streamOutput(ctx context.Context, r io.ReadCloser) error {
 	return scanner.Err()
 }
 
-// StreamMessage represents a Claude stream-json output message.
-type StreamMessage struct {
-	Type    string `json:"type"`
-	Content string `json:"content,omitempty"`
-	Tool    string `json:"tool,omitempty"`
-	Message string `json:"message,omitempty"`
-	Result  string `json:"result,omitempty"`
+// StreamEvent represents a Claude stream-json event (top-level).
+// Format: {"type":"assistant|user|result|system","message":{...},"subtype":"..."}
+type StreamEvent struct {
+	Type    string          `json:"type"`
+	Subtype string          `json:"subtype,omitempty"`
+	Message json.RawMessage `json:"message,omitempty"`
+}
+
+// StreamMessageContent represents content items within a message.
+type StreamMessageContent struct {
+	Type      string          `json:"type"`                 // "text", "tool_use", "tool_result"
+	Text      string          `json:"text,omitempty"`       // For type="text"
+	Name      string          `json:"name,omitempty"`       // For type="tool_use"
+	ID        string          `json:"id,omitempty"`         // For type="tool_use"
+	Input     json.RawMessage `json:"input,omitempty"`      // For type="tool_use"
+	ToolUseID string          `json:"tool_use_id,omitempty"`// For type="tool_result"
+	Content   string          `json:"content,omitempty"`    // For type="tool_result"
+}
+
+// StreamMessageWrapper wraps the message content array.
+type StreamMessageWrapper struct {
+	Content []StreamMessageContent `json:"content"`
 }
 
 // parseStreamJSON extracts display text from a stream-json line.
+// Claude's stream-json format is:
+//   {"type":"assistant","message":{"content":[{"type":"text","text":"..."}]}}
+//   {"type":"assistant","message":{"content":[{"type":"tool_use","name":"Bash","input":{...}}]}}
+//   {"type":"user","message":{"content":[{"type":"tool_result","content":"..."}]}}
+//   {"type":"result","subtype":"success",...}
+//   {"type":"system","subtype":"init",...}
 func (l *Loop) parseStreamJSON(line string) string {
 	line = strings.TrimSpace(line)
 	if line == "" {
@@ -420,34 +441,146 @@ func (l *Loop) parseStreamJSON(line string) string {
 	}
 
 	// Try to parse as JSON
-	var msg StreamMessage
-	if err := json.Unmarshal([]byte(line), &msg); err != nil {
+	var event StreamEvent
+	if err := json.Unmarshal([]byte(line), &event); err != nil {
 		// Not JSON, return as-is
 		return line
 	}
 
-	// Format based on message type
-	switch msg.Type {
-	case "assistant":
-		return msg.Content
-	case "tool_use":
-		return fmt.Sprintf("[%s] %s", msg.Tool, msg.Message)
-	case "tool_result":
-		// Truncate long results
-		result := msg.Result
-		if len(result) > 200 {
-			result = result[:200] + "..."
+	switch event.Type {
+	case "assistant", "user":
+		// Parse the nested message wrapper
+		var wrapper StreamMessageWrapper
+		if err := json.Unmarshal(event.Message, &wrapper); err != nil {
+			return ""
 		}
-		return result
-	case "error":
-		return fmt.Sprintf("ERROR: %s", msg.Message)
-	default:
-		// Return content if present
-		if msg.Content != "" {
-			return msg.Content
+		return formatMessageContent(wrapper.Content, event.Type)
+
+	case "result":
+		if event.Subtype == "success" {
+			return "[Session completed]"
 		}
-		if msg.Message != "" {
-			return msg.Message
+		return fmt.Sprintf("[Result: %s]", event.Subtype)
+
+	case "system":
+		if event.Subtype == "init" {
+			return "[Session started]"
+		}
+		return ""
+	}
+
+	return ""
+}
+
+// formatMessageContent formats content items for display.
+func formatMessageContent(content []StreamMessageContent, eventType string) string {
+	var parts []string
+
+	for _, item := range content {
+		switch item.Type {
+		case "text":
+			if item.Text != "" {
+				parts = append(parts, item.Text)
+			}
+		case "tool_use":
+			// Extract command preview for Bash, or just show tool name
+			desc := extractToolDescription(item.Name, item.Input)
+			parts = append(parts, fmt.Sprintf("[%s] %s", item.Name, desc))
+		case "tool_result":
+			// Clean up and truncate tool results
+			result := normalizeToolResult(item.Content)
+			if result != "" {
+				parts = append(parts, result)
+			}
+		}
+	}
+
+	return strings.Join(parts, "\n")
+}
+
+// normalizeToolResult cleans up tool result content for display.
+// Removes cat -n style line numbers, collapses whitespace, and truncates.
+func normalizeToolResult(content string) string {
+	if content == "" {
+		return ""
+	}
+
+	// Split into lines and process each
+	lines := strings.Split(content, "\n")
+	var cleanLines []string
+
+	for _, line := range lines {
+		// Trim whitespace
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+
+		// Remove cat -n style line number prefixes (e.g., "    1→", "   12→")
+		// Pattern: optional spaces, digits, arrow/tab, then content
+		if idx := strings.Index(line, "→"); idx != -1 && idx < 10 {
+			// Check if everything before → is spaces and digits
+			prefix := line[:idx]
+			isLineNum := true
+			for _, c := range prefix {
+				if c != ' ' && (c < '0' || c > '9') {
+					isLineNum = false
+					break
+				}
+			}
+			if isLineNum {
+				line = strings.TrimSpace(line[idx+len("→"):])
+			}
+		}
+
+		if line != "" {
+			cleanLines = append(cleanLines, line)
+		}
+	}
+
+	// Join back and truncate
+	result := strings.Join(cleanLines, " ")
+
+	// Collapse multiple spaces
+	for strings.Contains(result, "  ") {
+		result = strings.ReplaceAll(result, "  ", " ")
+	}
+
+	// Truncate
+	if len(result) > 200 {
+		result = result[:200] + "..."
+	}
+
+	return result
+}
+
+// extractToolDescription gets a short description of the tool input.
+func extractToolDescription(toolName string, input json.RawMessage) string {
+	if len(input) == 0 {
+		return ""
+	}
+
+	// For Bash, try to extract the command
+	if toolName == "Bash" {
+		var bashInput struct {
+			Command string `json:"command"`
+		}
+		if err := json.Unmarshal(input, &bashInput); err == nil && bashInput.Command != "" {
+			cmd := bashInput.Command
+			if len(cmd) > 60 {
+				cmd = cmd[:60] + "..."
+			}
+			return cmd
+		}
+	}
+
+	// For Read/Write/Edit, try to extract the file path
+	if toolName == "Read" || toolName == "Write" || toolName == "Edit" {
+		var fileInput struct {
+			FilePath string `json:"file_path"`
+		}
+		if err := json.Unmarshal(input, &fileInput); err == nil && fileInput.FilePath != "" {
+			return fileInput.FilePath
 		}
 	}
 
