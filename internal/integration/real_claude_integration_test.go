@@ -377,12 +377,16 @@ func TestRealSprite_SingleIterationWithClaude(t *testing.T) {
 }
 
 // TestRealSprite_FullLoopCompletion verifies the full loop runs to completion with ExitReasonDone.
+// This test uses cli.SetupSprite patterns and production Loop with real Claude via NewLoopWithOptions
+// to ensure tests exercise the same code paths as production.
 func TestRealSprite_FullLoopCompletion(t *testing.T) {
 	env := testutil.SetupRealSpriteEnv(t)
 
 	spriteName := testutil.GenerateTestSpriteName(t)
 	t.Logf("testing with Sprite: %s", spriteName)
 
+	// Register sprite for cleanup (production pattern)
+	testutil.RegisterSprite(spriteName)
 	t.Cleanup(func() {
 		testutil.CleanupSprite(t, env.Client, spriteName)
 	})
@@ -440,7 +444,7 @@ func TestRealSprite_FullLoopCompletion(t *testing.T) {
 	require.NoError(t, store.SaveTasks("test-branch", tasks))
 	require.NoError(t, store.SaveState("test-branch", initialState))
 
-	// Create config
+	// Create config with max iterations to allow loop to complete
 	cfg := &config.Config{
 		Limits: config.Limits{
 			MaxIterations:       5,
@@ -460,7 +464,7 @@ func TestRealSprite_FullLoopCompletion(t *testing.T) {
 	}
 	require.NoError(t, store.CreateSession(session))
 
-	// Create TUI that writes to test log
+	// Create TUI that writes to discard (no terminal for tests)
 	testTUI := createTestTUI()
 
 	// Find template dir
@@ -468,10 +472,29 @@ func TestRealSprite_FullLoopCompletion(t *testing.T) {
 	require.NotEmpty(t, projectRoot, "could not find project root")
 	templateDir := filepath.Join(projectRoot, ".wisp", "templates", "default")
 
-	// Create and run loop
-	l := loop.NewLoop(env.Client, syncMgr, store, cfg, session, testTUI, repoPath, templateDir)
+	// Create ClaudeConfig with test-appropriate settings
+	// Use enough turns for the tasks but with budget control
+	claudeCfg := loop.ClaudeConfig{
+		MaxTurns:     30, // Enough turns to complete two simple tasks
+		MaxBudget:    2.00,
+		Verbose:      true,
+		OutputFormat: "stream-json",
+	}
 
-	t.Log("Running loop...")
+	// Create Loop using NewLoopWithOptions with production-like config
+	l := loop.NewLoopWithOptions(loop.LoopOptions{
+		Client:       env.Client,
+		SyncManager:  syncMgr,
+		Store:        store,
+		Config:       cfg,
+		Session:      session,
+		TUI:          testTUI,
+		RepoPath:     repoPath,
+		TemplateDir:  templateDir,
+		ClaudeConfig: claudeCfg,
+	})
+
+	t.Log("Running loop with production code path...")
 	result := l.Run(ctx)
 
 	t.Logf("Loop result: reason=%s, iterations=%d", result.Reason, result.Iterations)
@@ -482,30 +505,83 @@ func TestRealSprite_FullLoopCompletion(t *testing.T) {
 	// Verify result
 	assert.Equal(t, loop.ExitReasonDone, result.Reason, "loop should exit with ExitReasonDone")
 
-	// Verify all tasks passed locally
+	// ============================================================
+	// Verify production state sync works end-to-end
+	// All state files should be synced from Sprite to local store
+	// ============================================================
+
+	// Verify state.json synced correctly
+	finalState, err := store.LoadState("test-branch")
+	require.NoError(t, err, "should be able to load final state from local store")
+	assert.Equal(t, state.StatusDone, finalState.Status, "final status should be DONE")
+	assert.NotEmpty(t, finalState.Summary, "final state should have a summary")
+	t.Logf("Final state: status=%s, summary=%s", finalState.Status, finalState.Summary)
+
+	// Verify state.json also exists on Sprite (production sync bi-directional)
+	spriteState := readStateFromSprite(t, env.Client, spriteName, repoPath)
+	assert.Equal(t, state.StatusDone, spriteState.Status, "sprite state should also be DONE")
+
+	// Verify tasks.json synced correctly - all tasks should pass
 	finalTasks, err := store.LoadTasks("test-branch")
-	require.NoError(t, err)
+	require.NoError(t, err, "should be able to load final tasks from local store")
+	require.Len(t, finalTasks, 2, "should have 2 tasks")
 	for i, task := range finalTasks {
 		assert.True(t, task.Passes, "task %d should pass: %s", i, task.Description)
 	}
+	t.Logf("Tasks: %d total, all passing", len(finalTasks))
 
-	// Verify final state
-	finalState, err := store.LoadState("test-branch")
-	require.NoError(t, err)
-	assert.Equal(t, state.StatusDone, finalState.Status, "final status should be DONE")
-
-	// Verify history
-	history, err := store.LoadHistory("test-branch")
-	require.NoError(t, err)
-	assert.NotEmpty(t, history, "should have history entries")
-	t.Logf("History entries: %d", len(history))
-	for _, h := range history {
-		t.Logf("  Iteration %d: %s (tasks_completed=%d)", h.Iteration, h.Summary, h.TasksCompleted)
+	// Verify tasks.json also matches on Sprite
+	spriteTasks := readTasksFromSprite(t, env.Client, spriteName, repoPath)
+	require.Len(t, spriteTasks, 2, "sprite should have 2 tasks")
+	for i, task := range spriteTasks {
+		assert.True(t, task.Passes, "sprite task %d should pass: %s", i, task.Description)
 	}
 
-	// Verify files exist on Sprite
-	_, err = env.Client.ReadFile(ctx, spriteName, filepath.Join(repoPath, "src", "main.go"))
+	// ============================================================
+	// Verify production history recording works
+	// ============================================================
+
+	history, err := store.LoadHistory("test-branch")
+	require.NoError(t, err, "should be able to load history from local store")
+	assert.NotEmpty(t, history, "should have history entries")
+	assert.GreaterOrEqual(t, len(history), 1, "should have at least 1 history entry")
+
+	// Verify history entries have required fields
+	t.Logf("History entries: %d", len(history))
+	for _, h := range history {
+		assert.Greater(t, h.Iteration, 0, "history iteration should be > 0")
+		assert.NotEmpty(t, h.Status, "history entry should have status")
+		t.Logf("  Iteration %d: status=%s, summary=%s (tasks_completed=%d)",
+			h.Iteration, h.Status, h.Summary, h.TasksCompleted)
+	}
+
+	// Last history entry should show completion
+	lastHistory := history[len(history)-1]
+	assert.Equal(t, state.StatusDone, lastHistory.Status, "last history status should be DONE")
+	assert.Equal(t, 2, lastHistory.TasksCompleted, "last history should show 2 tasks completed")
+
+	// ============================================================
+	// Verify files created by Claude exist on Sprite
+	// ============================================================
+
+	// Verify src directory exists
+	_, _, exitCode, err = env.Client.ExecuteOutput(ctx, spriteName, repoPath, nil, "test", "-d", "src")
+	require.NoError(t, err, "should be able to check src directory")
+	assert.Equal(t, 0, exitCode, "src directory should exist")
+
+	// Verify src/main.go exists with expected content
+	mainGoContent, err := env.Client.ReadFile(ctx, spriteName, filepath.Join(repoPath, "src", "main.go"))
 	require.NoError(t, err, "src/main.go should exist on sprite")
+	assert.Contains(t, strings.ToLower(string(mainGoContent)), "hello",
+		"main.go should contain hello (case insensitive)")
+	t.Logf("main.go content length: %d bytes", len(mainGoContent))
+
+	// Verify a git commit was made
+	stdout, _, exitCode, err := env.Client.ExecuteOutput(ctx, spriteName, repoPath, nil, "git", "log", "--oneline", "-1")
+	require.NoError(t, err, "git log should work")
+	assert.Equal(t, 0, exitCode, "git log should succeed")
+	assert.NotEmpty(t, stdout, "should have at least one commit")
+	t.Logf("Latest commit: %s", strings.TrimSpace(string(stdout)))
 }
 
 // TestRealSprite_NeedsInputFlow verifies NEEDS_INPUT state works correctly.
