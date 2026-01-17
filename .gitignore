@@ -2,3 +2,6 @@
 .claude/settings.local.json
 .wisp/
 wisp
+
+# Web client
+web/node_modules/
