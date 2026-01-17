@@ -26,7 +26,7 @@ func NewSyncManager(client sprite.Client, store *Store) *SyncManager {
 }
 
 // SyncToSprite copies state.json, tasks.json, history.json from local to Sprite.
-// Files are written to <repoPath>/.wisp/ on the Sprite.
+// Files are written to /var/local/wisp/session/ on the Sprite.
 func (m *SyncManager) SyncToSprite(ctx context.Context, spriteName, branch, repoPath string) error {
 	// Sync state.json
 	state, err := m.store.LoadState(branch)
@@ -38,7 +38,7 @@ func (m *SyncManager) SyncToSprite(ctx context.Context, spriteName, branch, repo
 		if err != nil {
 			return fmt.Errorf("failed to marshal state: %w", err)
 		}
-		statePath := filepath.Join(repoPath, ".wisp", "state.json")
+		statePath := filepath.Join(sprite.SessionDir, "state.json")
 		if err := m.client.WriteFile(ctx, spriteName, statePath, stateData); err != nil {
 			return fmt.Errorf("failed to write state to sprite: %w", err)
 		}
@@ -54,7 +54,7 @@ func (m *SyncManager) SyncToSprite(ctx context.Context, spriteName, branch, repo
 		if err != nil {
 			return fmt.Errorf("failed to marshal tasks: %w", err)
 		}
-		tasksPath := filepath.Join(repoPath, ".wisp", "tasks.json")
+		tasksPath := filepath.Join(sprite.SessionDir, "tasks.json")
 		if err := m.client.WriteFile(ctx, spriteName, tasksPath, tasksData); err != nil {
 			return fmt.Errorf("failed to write tasks to sprite: %w", err)
 		}
@@ -70,7 +70,7 @@ func (m *SyncManager) SyncToSprite(ctx context.Context, spriteName, branch, repo
 		if err != nil {
 			return fmt.Errorf("failed to marshal history: %w", err)
 		}
-		historyPath := filepath.Join(repoPath, ".wisp", "history.json")
+		historyPath := filepath.Join(sprite.SessionDir, "history.json")
 		if err := m.client.WriteFile(ctx, spriteName, historyPath, historyData); err != nil {
 			return fmt.Errorf("failed to write history to sprite: %w", err)
 		}
@@ -80,10 +80,10 @@ func (m *SyncManager) SyncToSprite(ctx context.Context, spriteName, branch, repo
 }
 
 // SyncFromSprite copies state.json, tasks.json, history.json from Sprite to local.
-// Files are read from <repoPath>/.wisp/ on the Sprite.
+// Files are read from /var/local/wisp/session/ on the Sprite.
 func (m *SyncManager) SyncFromSprite(ctx context.Context, spriteName, branch, repoPath string) error {
 	// Sync state.json
-	statePath := filepath.Join(repoPath, ".wisp", "state.json")
+	statePath := filepath.Join(sprite.SessionDir, "state.json")
 	stateData, err := m.client.ReadFile(ctx, spriteName, statePath)
 	if err == nil && len(stateData) > 0 {
 		var state State
@@ -96,7 +96,7 @@ func (m *SyncManager) SyncFromSprite(ctx context.Context, spriteName, branch, re
 	}
 
 	// Sync tasks.json
-	tasksPath := filepath.Join(repoPath, ".wisp", "tasks.json")
+	tasksPath := filepath.Join(sprite.SessionDir, "tasks.json")
 	tasksData, err := m.client.ReadFile(ctx, spriteName, tasksPath)
 	if err == nil && len(tasksData) > 0 {
 		var tasks []Task
@@ -109,7 +109,7 @@ func (m *SyncManager) SyncFromSprite(ctx context.Context, spriteName, branch, re
 	}
 
 	// Sync history.json
-	historyPath := filepath.Join(repoPath, ".wisp", "history.json")
+	historyPath := filepath.Join(sprite.SessionDir, "history.json")
 	historyData, err := m.client.ReadFile(ctx, spriteName, historyPath)
 	if err == nil && len(historyData) > 0 {
 		var history []History
@@ -124,24 +124,24 @@ func (m *SyncManager) SyncFromSprite(ctx context.Context, spriteName, branch, re
 	return nil
 }
 
-// CopySettingsToSprite copies settings.json to ~/.claude/settings.json on the Sprite.
+// CopySettingsToSprite copies settings.json to /var/local/wisp/.claude/settings.json on the Sprite.
+// Uses /var/local/wisp due to permission issues with /home/sprite.
 func (m *SyncManager) CopySettingsToSprite(ctx context.Context, spriteName string, settings *config.Settings) error {
 	data, err := json.MarshalIndent(settings, "", "  ")
 	if err != nil {
 		return fmt.Errorf("failed to marshal settings: %w", err)
 	}
 
-	// Write to Claude Code's settings location
-	settingsPath := "/home/sprite/.claude/settings.json"
+	// Write to Claude Code's settings location in /var/local/wisp
+	settingsPath := "/var/local/wisp/.claude/settings.json"
 
 	// Ensure .claude directory exists
-	mkdirCmd := fmt.Sprintf("mkdir -p %s", filepath.Dir(settingsPath))
-	cmd, err := m.client.Execute(ctx, spriteName, "", nil, "bash", "-c", mkdirCmd)
+	_, _, exitCode, err := m.client.ExecuteOutput(ctx, spriteName, "", nil, "mkdir", "-p", filepath.Dir(settingsPath))
 	if err != nil {
 		return fmt.Errorf("failed to create .claude directory: %w", err)
 	}
-	if err := cmd.Wait(); err != nil {
-		return fmt.Errorf("failed to create .claude directory: %w", err)
+	if exitCode != 0 {
+		return fmt.Errorf("mkdir .claude failed with exit code %d", exitCode)
 	}
 
 	if err := m.client.WriteFile(ctx, spriteName, settingsPath, data); err != nil {
@@ -151,23 +151,12 @@ func (m *SyncManager) CopySettingsToSprite(ctx context.Context, spriteName strin
 	return nil
 }
 
-// CopyTemplatesToSprite copies template files from local templates/ to repo .wisp/ on Sprite.
-func (m *SyncManager) CopyTemplatesToSprite(ctx context.Context, spriteName, repoPath, localTemplatesDir string) error {
+// CopyTemplatesToSprite copies template files from local templates/ to /var/local/wisp/templates/ on Sprite.
+func (m *SyncManager) CopyTemplatesToSprite(ctx context.Context, spriteName, localTemplatesDir string) error {
 	// Read all files from the local templates directory
 	entries, err := os.ReadDir(localTemplatesDir)
 	if err != nil {
 		return fmt.Errorf("failed to read templates directory: %w", err)
-	}
-
-	// Ensure .wisp directory exists on Sprite
-	wispDir := filepath.Join(repoPath, ".wisp")
-	mkdirCmd := fmt.Sprintf("mkdir -p %s", wispDir)
-	cmd, err := m.client.Execute(ctx, spriteName, "", nil, "bash", "-c", mkdirCmd)
-	if err != nil {
-		return fmt.Errorf("failed to create .wisp directory: %w", err)
-	}
-	if err := cmd.Wait(); err != nil {
-		return fmt.Errorf("failed to create .wisp directory: %w", err)
 	}
 
 	for _, entry := range entries {
@@ -176,7 +165,7 @@ func (m *SyncManager) CopyTemplatesToSprite(ctx context.Context, spriteName, rep
 		}
 
 		localPath := filepath.Join(localTemplatesDir, entry.Name())
-		remotePath := filepath.Join(wispDir, entry.Name())
+		remotePath := filepath.Join(sprite.TemplatesDir, entry.Name())
 
 		content, err := os.ReadFile(localPath)
 		if err != nil {
@@ -197,14 +186,14 @@ type Response struct {
 }
 
 // WriteResponseToSprite writes response.json to the Sprite for NEEDS_INPUT flow.
-func (m *SyncManager) WriteResponseToSprite(ctx context.Context, spriteName, repoPath, answer string) error {
+func (m *SyncManager) WriteResponseToSprite(ctx context.Context, spriteName, answer string) error {
 	response := Response{Answer: answer}
 	data, err := json.MarshalIndent(response, "", "  ")
 	if err != nil {
 		return fmt.Errorf("failed to marshal response: %w", err)
 	}
 
-	responsePath := filepath.Join(repoPath, ".wisp", "response.json")
+	responsePath := filepath.Join(sprite.SessionDir, "response.json")
 	if err := m.client.WriteFile(ctx, spriteName, responsePath, data); err != nil {
 		return fmt.Errorf("failed to write response to sprite: %w", err)
 	}
@@ -212,16 +201,17 @@ func (m *SyncManager) WriteResponseToSprite(ctx context.Context, spriteName, rep
 	return nil
 }
 
-// EnsureWispDirOnSprite creates the .wisp directory on the Sprite if it doesn't exist.
-func (m *SyncManager) EnsureWispDirOnSprite(ctx context.Context, spriteName, repoPath string) error {
-	wispDir := filepath.Join(repoPath, ".wisp")
-	mkdirCmd := fmt.Sprintf("mkdir -p %s", wispDir)
-	cmd, err := m.client.Execute(ctx, spriteName, "", nil, "bash", "-c", mkdirCmd)
-	if err != nil {
-		return fmt.Errorf("failed to create .wisp directory: %w", err)
-	}
-	if err := cmd.Wait(); err != nil {
-		return fmt.Errorf("failed to create .wisp directory: %w", err)
+// EnsureDirectoriesOnSprite creates the session, templates, and repos directories on the Sprite.
+func (m *SyncManager) EnsureDirectoriesOnSprite(ctx context.Context, spriteName string) error {
+	dirs := []string{sprite.SessionDir, sprite.TemplatesDir, sprite.ReposDir}
+	for _, dir := range dirs {
+		_, _, exitCode, err := m.client.ExecuteOutput(ctx, spriteName, "", nil, "mkdir", "-p", dir)
+		if err != nil {
+			return fmt.Errorf("failed to create directory %s: %w", dir, err)
+		}
+		if exitCode != 0 {
+			return fmt.Errorf("mkdir %s failed with exit code %d", dir, exitCode)
+		}
 	}
 	return nil
 }

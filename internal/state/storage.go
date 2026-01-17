@@ -189,6 +189,15 @@ func (s *Store) LoadState(branch string) (*State, error) {
 	return &state, nil
 }
 
+// HasInitializedState checks if a session has been properly initialized.
+// Returns true if tasks.json exists (created during wisp start after task generation).
+// This is used to detect broken sessions where start crashed before completing.
+func (s *Store) HasInitializedState(branch string) bool {
+	tasksPath := filepath.Join(s.sessionDir(branch), "tasks.json")
+	_, err := os.Stat(tasksPath)
+	return err == nil
+}
+
 // SaveTasks writes tasks.json to the session directory.
 func (s *Store) SaveTasks(branch string, tasks []Task) error {
 	dir := s.sessionDir(branch)

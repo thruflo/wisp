@@ -146,7 +146,7 @@ func TestSyncManager_SyncToSprite(t *testing.T) {
 	// Check state was written
 	var stateWritten bool
 	for _, call := range mockClient.writeCalls {
-		if call.path == "/home/sprite/repo/.wisp/state.json" {
+		if call.path == "/var/local/wisp/session/state.json" {
 			stateWritten = true
 			assert.Contains(t, string(call.content), "CONTINUE")
 			assert.Contains(t, string(call.content), "Working on it")
@@ -157,7 +157,7 @@ func TestSyncManager_SyncToSprite(t *testing.T) {
 	// Check tasks was written
 	var tasksWritten bool
 	for _, call := range mockClient.writeCalls {
-		if call.path == "/home/sprite/repo/.wisp/tasks.json" {
+		if call.path == "/var/local/wisp/session/tasks.json" {
 			tasksWritten = true
 			assert.Contains(t, string(call.content), "Setup project")
 		}
@@ -167,7 +167,7 @@ func TestSyncManager_SyncToSprite(t *testing.T) {
 	// Check history was written
 	var historyWritten bool
 	for _, call := range mockClient.writeCalls {
-		if call.path == "/home/sprite/repo/.wisp/history.json" {
+		if call.path == "/var/local/wisp/session/history.json" {
 			historyWritten = true
 			assert.Contains(t, string(call.content), "First iteration")
 		}
@@ -223,9 +223,9 @@ func TestSyncManager_SyncFromSprite(t *testing.T) {
 	require.NoError(t, store.CreateSession(session))
 
 	// Set up mock responses
-	mockClient.readResponses["/home/sprite/repo/.wisp/state.json"] = []byte(`{"status":"DONE","summary":"Completed all tasks"}`)
-	mockClient.readResponses["/home/sprite/repo/.wisp/tasks.json"] = []byte(`[{"category":"feature","description":"Done task","steps":[],"passes":true}]`)
-	mockClient.readResponses["/home/sprite/repo/.wisp/history.json"] = []byte(`[{"iteration":1,"summary":"Finished","tasks_completed":1,"status":"DONE"}]`)
+	mockClient.readResponses["/var/local/wisp/session/state.json"] = []byte(`{"status":"DONE","summary":"Completed all tasks"}`)
+	mockClient.readResponses["/var/local/wisp/session/tasks.json"] = []byte(`[{"category":"feature","description":"Done task","steps":[],"passes":true}]`)
+	mockClient.readResponses["/var/local/wisp/session/history.json"] = []byte(`[{"iteration":1,"summary":"Finished","tasks_completed":1,"status":"DONE"}]`)
 
 	// Sync from sprite
 	ctx := context.Background()
@@ -314,10 +314,12 @@ func TestSyncManager_CopySettingsToSprite(t *testing.T) {
 
 	// Should have executed mkdir and written file
 	require.Len(t, mockClient.executeCalls, 1)
-	assert.Contains(t, mockClient.executeCalls[0].args, "mkdir -p /home/sprite/.claude")
+	assert.Contains(t, mockClient.executeCalls[0].args, "mkdir")
+	assert.Contains(t, mockClient.executeCalls[0].args, "-p")
+	assert.Contains(t, mockClient.executeCalls[0].args, "/var/local/wisp/.claude")
 
 	require.Len(t, mockClient.writeCalls, 1)
-	assert.Equal(t, "/home/sprite/.claude/settings.json", mockClient.writeCalls[0].path)
+	assert.Equal(t, "/var/local/wisp/.claude/settings.json", mockClient.writeCalls[0].path)
 	assert.Contains(t, string(mockClient.writeCalls[0].content), "Read(~/.ssh/**)")
 	assert.Contains(t, string(mockClient.writeCalls[0].content), "playwright")
 }
@@ -340,14 +342,10 @@ func TestSyncManager_CopyTemplatesToSprite(t *testing.T) {
 	syncManager := NewSyncManager(mockClient, store)
 
 	ctx := context.Background()
-	err := syncManager.CopyTemplatesToSprite(ctx, "wisp-abc", "/home/sprite/repo", templatesDir)
+	err := syncManager.CopyTemplatesToSprite(ctx, "wisp-abc", templatesDir)
 	require.NoError(t, err)
 
-	// Should have executed mkdir
-	require.Len(t, mockClient.executeCalls, 1)
-	assert.Contains(t, mockClient.executeCalls[0].args, "mkdir -p /home/sprite/repo/.wisp")
-
-	// Should have written all 3 template files
+	// Should have written all 3 template files (no more mkdir needed, EnsureDirectoriesOnSprite handles that)
 	require.Len(t, mockClient.writeCalls, 3)
 
 	// Verify each template was written
@@ -356,9 +354,9 @@ func TestSyncManager_CopyTemplatesToSprite(t *testing.T) {
 		paths[call.path] = string(call.content)
 	}
 
-	assert.Contains(t, paths["/home/sprite/repo/.wisp/iterate.md"], "Iteration prompt")
-	assert.Contains(t, paths["/home/sprite/repo/.wisp/create-tasks.md"], "Create tasks prompt")
-	assert.Contains(t, paths["/home/sprite/repo/.wisp/context.md"], "Context")
+	assert.Contains(t, paths["/var/local/wisp/templates/iterate.md"], "Iteration prompt")
+	assert.Contains(t, paths["/var/local/wisp/templates/create-tasks.md"], "Create tasks prompt")
+	assert.Contains(t, paths["/var/local/wisp/templates/context.md"], "Context")
 }
 
 func TestSyncManager_WriteResponseToSprite(t *testing.T) {
@@ -370,16 +368,16 @@ func TestSyncManager_WriteResponseToSprite(t *testing.T) {
 	syncManager := NewSyncManager(mockClient, store)
 
 	ctx := context.Background()
-	err := syncManager.WriteResponseToSprite(ctx, "wisp-abc", "/home/sprite/repo", "Yes, use the Redis approach")
+	err := syncManager.WriteResponseToSprite(ctx, "wisp-abc", "Yes, use the Redis approach")
 	require.NoError(t, err)
 
 	require.Len(t, mockClient.writeCalls, 1)
-	assert.Equal(t, "/home/sprite/repo/.wisp/response.json", mockClient.writeCalls[0].path)
+	assert.Equal(t, "/var/local/wisp/session/response.json", mockClient.writeCalls[0].path)
 	assert.Contains(t, string(mockClient.writeCalls[0].content), "Yes, use the Redis approach")
 	assert.Contains(t, string(mockClient.writeCalls[0].content), `"answer"`)
 }
 
-func TestSyncManager_EnsureWispDirOnSprite(t *testing.T) {
+func TestSyncManager_EnsureDirectoriesOnSprite(t *testing.T) {
 	t.Parallel()
 
 	tmpDir := t.TempDir()
@@ -388,11 +386,11 @@ func TestSyncManager_EnsureWispDirOnSprite(t *testing.T) {
 	syncManager := NewSyncManager(mockClient, store)
 
 	ctx := context.Background()
-	err := syncManager.EnsureWispDirOnSprite(ctx, "wisp-abc", "/home/sprite/repo")
+	err := syncManager.EnsureDirectoriesOnSprite(ctx, "wisp-abc")
 	require.NoError(t, err)
 
-	require.Len(t, mockClient.executeCalls, 1)
-	assert.Contains(t, mockClient.executeCalls[0].args, "mkdir -p /home/sprite/repo/.wisp")
+	// Should have created 3 directories: session, templates, repos
+	require.Len(t, mockClient.executeCalls, 3)
 }
 
 func TestSyncManager_SyncToSprite_WriteError(t *testing.T) {
@@ -442,7 +440,7 @@ func TestSyncManager_SyncFromSprite_ParseError(t *testing.T) {
 	require.NoError(t, store.CreateSession(session))
 
 	// Set up invalid JSON response
-	mockClient.readResponses["/home/sprite/repo/.wisp/state.json"] = []byte(`{invalid json}`)
+	mockClient.readResponses["/var/local/wisp/session/state.json"] = []byte(`{invalid json}`)
 
 	ctx := context.Background()
 	err := syncManager.SyncFromSprite(ctx, "wisp-abc", "wisp/feature", "/home/sprite/repo")
