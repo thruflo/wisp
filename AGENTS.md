@@ -113,6 +113,8 @@ func TestFullWorkflow(t *testing.T) { ... }
 
 Run with: `go test -tags=integration ./...`
 
+IMPORTANT: When you run integration tests that could hang, make sure you use tight timeouts.
+
 ## Dependencies
 
 ```

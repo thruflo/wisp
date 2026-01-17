@@ -238,7 +238,7 @@
       "Document how to clean up orphaned sprites",
       "Add cross-references from README.md to testing.md"
     ],
-    "passes": false
+    "passes": true
   },
   {
     "category": "setup",
@@ -248,6 +248,6 @@
       "Add unit-tests job running on every push and PR",
       "Add component-tests job running integration tests with mocks"
     ],
-    "passes": false
+    "passes": true
   }
 ]
