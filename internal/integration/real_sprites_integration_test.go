@@ -181,9 +181,9 @@ func TestRealSprite_StateFileRoundTrip(t *testing.T) {
 	require.NoError(t, err, "failed to create Sprite")
 
 	// Create .wisp directory
-	cmd, err := env.Client.Execute(ctx, spriteName, "", nil, "mkdir", "-p", "/tmp/repo/.wisp")
+	_, _, exitCode, err := env.Client.ExecuteOutput(ctx, spriteName, "", nil, "mkdir", "-p", "/tmp/repo/.wisp")
 	require.NoError(t, err)
-	require.NoError(t, cmd.Wait())
+	require.Equal(t, 0, exitCode, "mkdir should succeed")
 
 	// Create test state
 	testState := &state.State{
