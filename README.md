@@ -1,3 +1,5 @@
+<img width="98" src="docs/wisp-icon.png" />
+
 # Wisp - Ralphing on Sprites
 
 Wisp automates spec-driven development using autonomous
