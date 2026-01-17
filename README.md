@@ -2,8 +2,7 @@
 
 # Wisp - Ralphing on Sprites
 
-Wisp automates spec-driven development using autonomous
-Claude Code loops in isolated [Sprites](https://sprites.dev).
+Wisp automates spec-driven development using pure bash loop Ralph in isolated [Sprites](https://sprites.dev).
 
 ## Requirements
 
