@@ -30,9 +30,17 @@ restoring state from local storage, and continuing the iteration loop.
 
 The branch argument is required and must match an existing session.
 
+Remote Access:
+  Use --server to start a web server alongside the TUI for monitoring and
+  interacting with the session from any device (phone, tablet, another computer).
+  On first use, you'll be prompted to set a password. Use --port to customize
+  the server port (default: 8374). Use --password to change the password.
+
 Example:
   wisp resume wisp/my-feature
-  wisp resume feature/auth-implementation`,
+  wisp resume feature/auth-implementation
+  wisp resume wisp/my-feature --server
+  wisp resume wisp/my-feature --server --port 9000`,
 	Args: cobra.ExactArgs(1),
 	RunE: runResume,
 }

@@ -53,10 +53,18 @@ and begins the iteration loop.
 The --repo and --spec flags are required. The spec path should be relative
 to the repository root and point to the RFC/specification document.
 
+Remote Access:
+  Use --server to start a web server alongside the TUI for monitoring and
+  interacting with the session from any device (phone, tablet, another computer).
+  On first use, you'll be prompted to set a password. Use --port to customize
+  the server port (default: 8374). Use --password to change the password.
+
 Example:
   wisp start --repo org/repo --spec docs/rfc.md
   wisp start --repo org/repo --spec docs/rfc.md --branch feature/my-feature
-  wisp start --repo org/repo --spec docs/rfc.md --sibling-repos org/other-repo`,
+  wisp start --repo org/repo --spec docs/rfc.md --sibling-repos org/other-repo
+  wisp start --repo org/repo --spec docs/rfc.md --server
+  wisp start --repo org/repo --spec docs/rfc.md --server --port 9000`,
 	RunE: runStart,
 }
 
