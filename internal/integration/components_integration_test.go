@@ -205,8 +205,8 @@ func TestFullInitStartDoneFlow(t *testing.T) {
 	repoPath := "/home/sprite/test-org/test-repo"
 
 	// Set up initial state files that would be created during start
-	mockClient.SetFile(filepath.Join(repoPath, ".wisp", "tasks.json"), mustMarshalJSON(t, expectedTasks))
-	mockClient.SetFile(filepath.Join(repoPath, ".wisp", "state.json"), mustMarshalJSON(t, &state.State{
+	mockClient.SetFile(filepath.Join(sprite.SessionDir, "tasks.json"), mustMarshalJSON(t, expectedTasks))
+	mockClient.SetFile(filepath.Join(sprite.SessionDir, "state.json"), mustMarshalJSON(t, &state.State{
 		Status:  state.StatusContinue,
 		Summary: "Ready to start",
 	}))
@@ -216,7 +216,7 @@ func TestFullInitStartDoneFlow(t *testing.T) {
 
 	// Sync initial state from "Sprite" to local
 	ctx := context.Background()
-	err := syncMgr.SyncFromSprite(ctx, session.SpriteName, branch, repoPath)
+	err := syncMgr.SyncFromSprite(ctx, session.SpriteName, branch)
 	require.NoError(t, err)
 
 	// Verify tasks were synced
@@ -231,7 +231,7 @@ func TestFullInitStartDoneFlow(t *testing.T) {
 	require.NoError(t, store.SaveTasks(branch, tasks))
 
 	// Set DONE state on Sprite
-	mockClient.SetFile(filepath.Join(repoPath, ".wisp", "state.json"), mustMarshalJSON(t, &state.State{
+	mockClient.SetFile(filepath.Join(sprite.SessionDir, "state.json"), mustMarshalJSON(t, &state.State{
 		Status:  state.StatusDone,
 		Summary: "All tasks completed",
 		Verification: &state.Verification{
@@ -283,13 +283,12 @@ func TestNeedsInputPauseAndResumeCycle(t *testing.T) {
 
 	// Setup mock client
 	mockClient := sprite.NewMockSpriteClient()
-	repoPath := "/home/sprite/test-org/test-repo"
 
 	// Set up tasks
 	tasks := []state.Task{
 		{Category: "feature", Description: "Task requiring input", Passes: false},
 	}
-	mockClient.SetFile(filepath.Join(repoPath, ".wisp", "tasks.json"), mustMarshalJSON(t, tasks))
+	mockClient.SetFile(filepath.Join(sprite.SessionDir, "tasks.json"), mustMarshalJSON(t, tasks))
 	require.NoError(t, store.SaveTasks(branch, tasks))
 
 	// Set NEEDS_INPUT state
@@ -298,14 +297,14 @@ func TestNeedsInputPauseAndResumeCycle(t *testing.T) {
 		Summary:  "Need clarification",
 		Question: "Should we use approach A or B?",
 	}
-	mockClient.SetFile(filepath.Join(repoPath, ".wisp", "state.json"), mustMarshalJSON(t, needsInputState))
+	mockClient.SetFile(filepath.Join(sprite.SessionDir, "state.json"), mustMarshalJSON(t, needsInputState))
 
 	// Create sync manager
 	syncMgr := state.NewSyncManager(mockClient, store)
 	ctx := context.Background()
 
 	// Sync state from Sprite to local
-	err := syncMgr.SyncFromSprite(ctx, session.SpriteName, branch, repoPath)
+	err := syncMgr.SyncFromSprite(ctx, session.SpriteName, branch)
 	require.NoError(t, err)
 
 	// Verify local state reflects NEEDS_INPUT
@@ -316,11 +315,11 @@ func TestNeedsInputPauseAndResumeCycle(t *testing.T) {
 
 	// Simulate user providing response
 	userResponse := "Use approach A for simplicity"
-	err = syncMgr.WriteResponseToSprite(ctx, session.SpriteName, repoPath, userResponse)
+	err = syncMgr.WriteResponseToSprite(ctx, session.SpriteName, userResponse)
 	require.NoError(t, err)
 
 	// Verify response.json was written to Sprite
-	responseData, ok := mockClient.GetFile(filepath.Join(repoPath, ".wisp", "response.json"))
+	responseData, ok := mockClient.GetFile(filepath.Join(sprite.SessionDir, "response.json"))
 	require.True(t, ok, "response.json should be written")
 
 	var response state.Response
@@ -330,13 +329,13 @@ func TestNeedsInputPauseAndResumeCycle(t *testing.T) {
 
 	// Simulate Claude reading response and continuing
 	// Update state to CONTINUE
-	mockClient.SetFile(filepath.Join(repoPath, ".wisp", "state.json"), mustMarshalJSON(t, &state.State{
+	mockClient.SetFile(filepath.Join(sprite.SessionDir, "state.json"), mustMarshalJSON(t, &state.State{
 		Status:  state.StatusContinue,
 		Summary: "Proceeding with approach A",
 	}))
 
 	// Sync again
-	err = syncMgr.SyncFromSprite(ctx, session.SpriteName, branch, repoPath)
+	err = syncMgr.SyncFromSprite(ctx, session.SpriteName, branch)
 	require.NoError(t, err)
 
 	// Verify state is now CONTINUE
@@ -368,7 +367,7 @@ func TestUpdateCommandWithRFCChanges(t *testing.T) {
 		{Category: "feature", Description: "Implement main logic", Passes: false},
 		{Category: "test", Description: "Add unit tests", Passes: false},
 	}
-	mockClient.SetFile(filepath.Join(repoPath, ".wisp", "tasks.json"), mustMarshalJSON(t, existingTasks))
+	mockClient.SetFile(filepath.Join(sprite.SessionDir, "tasks.json"), mustMarshalJSON(t, existingTasks))
 	require.NoError(t, store.SaveTasks(branch, existingTasks))
 
 	// Write updated RFC locally
@@ -392,7 +391,7 @@ func TestUpdateCommandWithRFCChanges(t *testing.T) {
 
 	// Write diff to Sprite (simulating what update command does)
 	diff := "# RFC Changes\n\n+ Implement the main logic with caching\n+ Add integration tests"
-	err = mockClient.WriteFile(ctx, session.SpriteName, filepath.Join(repoPath, ".wisp", "rfc-diff.md"), []byte(diff))
+	err = mockClient.WriteFile(ctx, session.SpriteName, filepath.Join(sprite.SessionDir, "rfc-diff.md"), []byte(diff))
 	require.NoError(t, err)
 
 	// Simulate updated tasks after RFC reconciliation
@@ -402,11 +401,11 @@ func TestUpdateCommandWithRFCChanges(t *testing.T) {
 		{Category: "test", Description: "Add unit tests", Passes: false},
 		{Category: "test", Description: "Add integration tests", Passes: false},
 	}
-	mockClient.SetFile(filepath.Join(repoPath, ".wisp", "tasks.json"), mustMarshalJSON(t, updatedTasks))
+	mockClient.SetFile(filepath.Join(sprite.SessionDir, "tasks.json"), mustMarshalJSON(t, updatedTasks))
 
 	// Sync from Sprite
 	syncMgr := state.NewSyncManager(mockClient, store)
-	err = syncMgr.SyncFromSprite(ctx, session.SpriteName, branch, repoPath)
+	err = syncMgr.SyncFromSprite(ctx, session.SpriteName, branch)
 	require.NoError(t, err)
 
 	// Verify tasks were updated
@@ -428,7 +427,6 @@ func TestReviewCommandWithFeedback(t *testing.T) {
 
 	// Setup mock client
 	mockClient := sprite.NewMockSpriteClient()
-	repoPath := "/home/sprite/test-org/test-repo"
 
 	// Set up existing tasks (all completed)
 	existingTasks := []state.Task{
@@ -436,7 +434,7 @@ func TestReviewCommandWithFeedback(t *testing.T) {
 		{Category: "feature", Description: "Implement main logic", Passes: true},
 		{Category: "test", Description: "Add unit tests", Passes: true},
 	}
-	mockClient.SetFile(filepath.Join(repoPath, ".wisp", "tasks.json"), mustMarshalJSON(t, existingTasks))
+	mockClient.SetFile(filepath.Join(sprite.SessionDir, "tasks.json"), mustMarshalJSON(t, existingTasks))
 	require.NoError(t, store.SaveTasks(branch, existingTasks))
 
 	// Write feedback file locally
@@ -449,11 +447,11 @@ func TestReviewCommandWithFeedback(t *testing.T) {
 
 	// Write feedback to Sprite (simulating what review command does)
 	ctx := context.Background()
-	err = mockClient.WriteFile(ctx, session.SpriteName, filepath.Join(repoPath, ".wisp", "feedback.md"), feedbackContent)
+	err = mockClient.WriteFile(ctx, session.SpriteName, filepath.Join(sprite.SessionDir, "feedback.md"), feedbackContent)
 	require.NoError(t, err)
 
 	// Verify feedback was written
-	spriteFeedback, ok := mockClient.GetFile(filepath.Join(repoPath, ".wisp", "feedback.md"))
+	spriteFeedback, ok := mockClient.GetFile(filepath.Join(sprite.SessionDir, "feedback.md"))
 	require.True(t, ok)
 	assert.Equal(t, sampleFeedback, string(spriteFeedback))
 
@@ -466,11 +464,11 @@ func TestReviewCommandWithFeedback(t *testing.T) {
 		{Category: "bugfix", Description: "Improve configuration validation", Passes: false},
 		{Category: "test", Description: "Increase test coverage to 80%", Passes: false},
 	}
-	mockClient.SetFile(filepath.Join(repoPath, ".wisp", "tasks.json"), mustMarshalJSON(t, feedbackTasks))
+	mockClient.SetFile(filepath.Join(sprite.SessionDir, "tasks.json"), mustMarshalJSON(t, feedbackTasks))
 
 	// Sync from Sprite
 	syncMgr := state.NewSyncManager(mockClient, store)
-	err = syncMgr.SyncFromSprite(ctx, session.SpriteName, branch, repoPath)
+	err = syncMgr.SyncFromSprite(ctx, session.SpriteName, branch)
 	require.NoError(t, err)
 
 	// Verify tasks were updated with feedback-addressing tasks
@@ -500,7 +498,6 @@ func TestStateSyncOnTaskCompletion(t *testing.T) {
 
 	// Setup mock client
 	mockClient := sprite.NewMockSpriteClient()
-	repoPath := "/home/sprite/test-org/test-repo"
 
 	// Set up initial state (one task incomplete)
 	tasks := []state.Task{
@@ -514,19 +511,19 @@ func TestStateSyncOnTaskCompletion(t *testing.T) {
 		{Category: "feature", Description: "Task 1", Passes: true},
 		{Category: "feature", Description: "Task 2", Passes: false},
 	}
-	mockClient.SetFile(filepath.Join(repoPath, ".wisp", "tasks.json"), mustMarshalJSON(t, completedTasks))
-	mockClient.SetFile(filepath.Join(repoPath, ".wisp", "state.json"), mustMarshalJSON(t, &state.State{
+	mockClient.SetFile(filepath.Join(sprite.SessionDir, "tasks.json"), mustMarshalJSON(t, completedTasks))
+	mockClient.SetFile(filepath.Join(sprite.SessionDir, "state.json"), mustMarshalJSON(t, &state.State{
 		Status:  state.StatusContinue,
 		Summary: "Completed Task 1",
 	}))
-	mockClient.SetFile(filepath.Join(repoPath, ".wisp", "history.json"), mustMarshalJSON(t, []state.History{
+	mockClient.SetFile(filepath.Join(sprite.SessionDir, "history.json"), mustMarshalJSON(t, []state.History{
 		{Iteration: 1, Summary: "Completed Task 1", TasksCompleted: 1, Status: state.StatusContinue},
 	}))
 
 	// Sync from Sprite
 	ctx := context.Background()
 	syncMgr := state.NewSyncManager(mockClient, store)
-	err := syncMgr.SyncFromSprite(ctx, session.SpriteName, branch, repoPath)
+	err := syncMgr.SyncFromSprite(ctx, session.SpriteName, branch)
 	require.NoError(t, err)
 
 	// Verify tasks synced
@@ -627,11 +624,11 @@ func TestMaxIterationsLimit(t *testing.T) {
 	repoPath := "/home/sprite/test-org/test-repo"
 
 	// Set up state that allows iteration
-	mockClient.SetFile(filepath.Join(repoPath, ".wisp", "state.json"), mustMarshalJSON(t, &state.State{
+	mockClient.SetFile(filepath.Join(sprite.SessionDir, "state.json"), mustMarshalJSON(t, &state.State{
 		Status:  state.StatusContinue,
 		Summary: "Working",
 	}))
-	mockClient.SetFile(filepath.Join(repoPath, ".wisp", "tasks.json"), mustMarshalJSON(t, tasks))
+	mockClient.SetFile(filepath.Join(sprite.SessionDir, "tasks.json"), mustMarshalJSON(t, tasks))
 
 	syncMgr := state.NewSyncManager(mockClient, store)
 	testTUI := createTestTUI()
@@ -683,7 +680,7 @@ func TestSpriteFailureHandling(t *testing.T) {
 	repoPath := "/home/sprite/test-org/test-repo"
 
 	// Don't set state.json - simulating Claude crash
-	mockClient.SetFile(filepath.Join(repoPath, ".wisp", "tasks.json"), mustMarshalJSON(t, tasks))
+	mockClient.SetFile(filepath.Join(sprite.SessionDir, "tasks.json"), mustMarshalJSON(t, tasks))
 
 	syncMgr := state.NewSyncManager(mockClient, store)
 	testTUI := createTestTUI()
@@ -750,13 +747,8 @@ func TestBranchNaming(t *testing.T) {
 		names[name] = true
 	}
 
-	// All names should be unique
+	// All names should be unique (due to random suffix)
 	assert.Len(t, names, 3, "Sprite names should be unique for different repo/branch combinations")
-
-	// Same inputs should produce same name
-	name1 := sprite.GenerateSpriteName("org/repo", "branch")
-	name2 := sprite.GenerateSpriteName("org/repo", "branch")
-	assert.Equal(t, name1, name2, "Same inputs should produce same sprite name")
 }
 
 // TestHistoryAppend tests history recording.

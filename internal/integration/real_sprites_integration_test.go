@@ -26,6 +26,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"github.com/thruflo/wisp/internal/sprite"
 	"github.com/thruflo/wisp/internal/state"
 	"github.com/thruflo/wisp/internal/testutil"
 )
@@ -249,10 +250,9 @@ func TestRealSprite_SyncManagerIntegration(t *testing.T) {
 	store := state.NewStore(tmpDir)
 	syncMgr := state.NewSyncManager(env.Client, store)
 
-	// Create test directory structure on Sprite using production SyncManager method
-	repoPath := "/tmp/test-repo"
-	err = syncMgr.EnsureWispDirOnSprite(ctx, spriteName, repoPath)
-	require.NoError(t, err, "failed to create .wisp directory on Sprite")
+	// Create directory structure on Sprite using production SyncManager method
+	err = syncMgr.EnsureDirectoriesOnSprite(ctx, spriteName)
+	require.NoError(t, err, "failed to create directories on Sprite")
 
 	// Create local session directory for the branch
 	branch := "test-branch"
@@ -285,19 +285,19 @@ func TestRealSprite_SyncManagerIntegration(t *testing.T) {
 	require.NoError(t, err)
 
 	// Sync TO Sprite
-	err = syncMgr.SyncToSprite(ctx, spriteName, branch, repoPath)
+	err = syncMgr.SyncToSprite(ctx, spriteName, branch)
 	require.NoError(t, err, "failed to sync to Sprite")
 
 	// Verify files exist on Sprite by reading them directly
-	stateData, err := env.Client.ReadFile(ctx, spriteName, repoPath+"/.wisp/state.json")
+	stateData, err := env.Client.ReadFile(ctx, spriteName, sprite.SessionDir+"/state.json")
 	require.NoError(t, err, "state.json should exist on Sprite")
 	assert.Contains(t, string(stateData), "NEEDS_INPUT")
 
-	tasksData, err := env.Client.ReadFile(ctx, spriteName, repoPath+"/.wisp/tasks.json")
+	tasksData, err := env.Client.ReadFile(ctx, spriteName, sprite.SessionDir+"/tasks.json")
 	require.NoError(t, err, "tasks.json should exist on Sprite")
 	assert.Contains(t, string(tasksData), "Implement API endpoints")
 
-	historyData, err := env.Client.ReadFile(ctx, spriteName, repoPath+"/.wisp/history.json")
+	historyData, err := env.Client.ReadFile(ctx, spriteName, sprite.SessionDir+"/history.json")
 	require.NoError(t, err, "history.json should exist on Sprite")
 	assert.Contains(t, string(historyData), "Initial setup")
 
@@ -308,7 +308,7 @@ func TestRealSprite_SyncManagerIntegration(t *testing.T) {
 	}
 	updatedStateData, err := json.MarshalIndent(updatedState, "", "  ")
 	require.NoError(t, err)
-	err = env.Client.WriteFile(ctx, spriteName, repoPath+"/.wisp/state.json", updatedStateData)
+	err = env.Client.WriteFile(ctx, spriteName, sprite.SessionDir+"/state.json", updatedStateData)
 	require.NoError(t, err)
 
 	// Clear local state to verify sync works
@@ -317,7 +317,7 @@ func TestRealSprite_SyncManagerIntegration(t *testing.T) {
 	require.NoError(t, os.MkdirAll(newWispDir, 0755))
 
 	// Sync FROM Sprite to new branch
-	err = syncMgr.SyncFromSprite(ctx, spriteName, newBranch, repoPath)
+	err = syncMgr.SyncFromSprite(ctx, spriteName, newBranch)
 	require.NoError(t, err, "failed to sync from Sprite")
 
 	// Verify state was synced

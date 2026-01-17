@@ -109,10 +109,9 @@ func TestRealSprite_SyncManagerSyncsAllFiles(t *testing.T) {
 	_, store := testutil.SetupTestDir(t)
 	syncMgr := state.NewSyncManager(env.Client, store)
 
-	// Create .wisp directory structure on Sprite
-	repoPath := "/tmp/test-repo"
-	err = syncMgr.EnsureWispDirOnSprite(ctx, spriteName, repoPath)
-	require.NoError(t, err, "failed to create .wisp directory on Sprite")
+	// Create directory structure on Sprite
+	err = syncMgr.EnsureDirectoriesOnSprite(ctx, spriteName)
+	require.NoError(t, err, "failed to create directories on Sprite")
 
 	// Set up local session
 	branch := "test-sync-all-files"
@@ -144,12 +143,12 @@ func TestRealSprite_SyncManagerSyncsAllFiles(t *testing.T) {
 	require.NoError(t, store.SaveHistory(branch, localHistory))
 
 	// Sync TO Sprite
-	err = syncMgr.SyncToSprite(ctx, spriteName, branch, repoPath)
+	err = syncMgr.SyncToSprite(ctx, spriteName, branch)
 	require.NoError(t, err, "failed to sync to Sprite")
 
 	// Verify all three files exist on Sprite
 	t.Run("state.json synced", func(t *testing.T) {
-		stateData, err := env.Client.ReadFile(ctx, spriteName, repoPath+"/.wisp/state.json")
+		stateData, err := env.Client.ReadFile(ctx, spriteName, sprite.SessionDir+"/state.json")
 		require.NoError(t, err, "state.json should exist on Sprite")
 
 		var syncedState state.State
@@ -159,7 +158,7 @@ func TestRealSprite_SyncManagerSyncsAllFiles(t *testing.T) {
 	})
 
 	t.Run("tasks.json synced", func(t *testing.T) {
-		tasksData, err := env.Client.ReadFile(ctx, spriteName, repoPath+"/.wisp/tasks.json")
+		tasksData, err := env.Client.ReadFile(ctx, spriteName, sprite.SessionDir+"/tasks.json")
 		require.NoError(t, err, "tasks.json should exist on Sprite")
 
 		var syncedTasks []state.Task
@@ -172,7 +171,7 @@ func TestRealSprite_SyncManagerSyncsAllFiles(t *testing.T) {
 	})
 
 	t.Run("history.json synced", func(t *testing.T) {
-		historyData, err := env.Client.ReadFile(ctx, spriteName, repoPath+"/.wisp/history.json")
+		historyData, err := env.Client.ReadFile(ctx, spriteName, sprite.SessionDir+"/history.json")
 		require.NoError(t, err, "history.json should exist on Sprite")
 
 		var syncedHistory []state.History
@@ -189,7 +188,7 @@ func TestRealSprite_SyncManagerSyncsAllFiles(t *testing.T) {
 	}
 	updatedStateData, err := json.MarshalIndent(updatedState, "", "  ")
 	require.NoError(t, err)
-	require.NoError(t, env.Client.WriteFile(ctx, spriteName, repoPath+"/.wisp/state.json", updatedStateData))
+	require.NoError(t, env.Client.WriteFile(ctx, spriteName, sprite.SessionDir+"/state.json", updatedStateData))
 
 	updatedTasks := []state.Task{
 		{Category: state.CategorySetup, Description: "Setup task", Passes: true},
@@ -197,7 +196,7 @@ func TestRealSprite_SyncManagerSyncsAllFiles(t *testing.T) {
 	}
 	updatedTasksData, err := json.MarshalIndent(updatedTasks, "", "  ")
 	require.NoError(t, err)
-	require.NoError(t, env.Client.WriteFile(ctx, spriteName, repoPath+"/.wisp/tasks.json", updatedTasksData))
+	require.NoError(t, env.Client.WriteFile(ctx, spriteName, sprite.SessionDir+"/tasks.json", updatedTasksData))
 
 	// Create new branch for sync FROM Sprite
 	newBranch := "test-sync-from-sprite"
@@ -209,7 +208,7 @@ func TestRealSprite_SyncManagerSyncsAllFiles(t *testing.T) {
 	require.NoError(t, store.CreateSession(newSession))
 
 	// Sync FROM Sprite
-	err = syncMgr.SyncFromSprite(ctx, spriteName, newBranch, repoPath)
+	err = syncMgr.SyncFromSprite(ctx, spriteName, newBranch)
 	require.NoError(t, err, "failed to sync from Sprite")
 
 	// Verify all files were synced back
@@ -320,12 +319,11 @@ func TestRealSprite_ErrorHandlingPaths(t *testing.T) {
 	_, store := testutil.SetupTestDir(t)
 	syncMgr := state.NewSyncManager(env.Client, store)
 
-	repoPath := "/tmp/error-test-repo"
-	err = syncMgr.EnsureWispDirOnSprite(ctx, spriteName, repoPath)
+	err = syncMgr.EnsureDirectoriesOnSprite(ctx, spriteName)
 	require.NoError(t, err)
 
 	t.Run("ReadFile on non-existent file returns error", func(t *testing.T) {
-		_, err := env.Client.ReadFile(ctx, spriteName, repoPath+"/.wisp/non-existent.json")
+		_, err := env.Client.ReadFile(ctx, spriteName, sprite.SessionDir+"/non-existent.json")
 		assert.Error(t, err, "reading non-existent file should return error")
 	})
 
@@ -339,7 +337,7 @@ func TestRealSprite_ErrorHandlingPaths(t *testing.T) {
 		require.NoError(t, store.CreateSession(session))
 
 		// Sync from Sprite where state.json doesn't exist
-		err := syncMgr.SyncFromSprite(ctx, spriteName, branch, repoPath)
+		err := syncMgr.SyncFromSprite(ctx, spriteName, branch)
 		// Should handle gracefully - might return error or empty state
 		// The important thing is it doesn't panic
 		if err != nil {
@@ -363,11 +361,11 @@ func TestRealSprite_ErrorHandlingPaths(t *testing.T) {
 		}))
 
 		// Sync should create the file
-		err := syncMgr.SyncToSprite(ctx, spriteName, branch, repoPath)
+		err := syncMgr.SyncToSprite(ctx, spriteName, branch)
 		require.NoError(t, err)
 
 		// Verify file was created
-		data, err := env.Client.ReadFile(ctx, spriteName, repoPath+"/.wisp/state.json")
+		data, err := env.Client.ReadFile(ctx, spriteName, sprite.SessionDir+"/state.json")
 		require.NoError(t, err)
 		assert.Contains(t, string(data), "CONTINUE")
 	})
@@ -385,7 +383,7 @@ func TestRealSprite_ErrorHandlingPaths(t *testing.T) {
 		require.NoError(t, err)
 
 		// Try to read file - should error
-		_, err = env.Client.ReadFile(ctx, spriteName, repoPath+"/.wisp/state.json")
+		_, err = env.Client.ReadFile(ctx, spriteName, sprite.SessionDir+"/state.json")
 		assert.Error(t, err, "reading from deleted Sprite should error")
 
 		// Recreate for cleanup to not fail
