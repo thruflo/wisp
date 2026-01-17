@@ -219,12 +219,16 @@ func truncateLine(line string, maxLen int) string {
 }
 
 // TestRealSprite_SingleIterationWithClaude verifies one iteration of the ralph loop works with real Claude.
+// This test uses the production Loop with NewLoopWithOptions to ensure tests exercise
+// the same code paths as production.
 func TestRealSprite_SingleIterationWithClaude(t *testing.T) {
 	env := testutil.SetupRealSpriteEnv(t)
 
 	spriteName := testutil.GenerateTestSpriteName(t)
 	t.Logf("testing with Sprite: %s", spriteName)
 
+	// Register sprite for cleanup
+	testutil.RegisterSprite(spriteName)
 	t.Cleanup(func() {
 		testutil.CleanupSprite(t, env.Client, spriteName)
 	})
@@ -263,23 +267,98 @@ func TestRealSprite_SingleIterationWithClaude(t *testing.T) {
 	}
 	writeStateToSprite(t, env.Client, spriteName, repoPath, initialState)
 
-	// Run one Claude iteration
-	t.Log("Running Claude iteration...")
-	err = runClaudeIteration(t, env.Client, spriteName, repoPath, 0.50, 3*time.Minute)
-	require.NoError(t, err, "Claude iteration should complete")
+	// Create local test environment
+	tmpDir := t.TempDir()
+	wispDir := filepath.Join(tmpDir, ".wisp", "sessions", "test-branch")
+	require.NoError(t, os.MkdirAll(wispDir, 0755))
 
-	// Verify state.json
-	finalState := readStateFromSprite(t, env.Client, spriteName, repoPath)
+	// Create local store and SyncManager
+	store := state.NewStore(tmpDir)
+	syncMgr := state.NewSyncManager(env.Client, store)
+
+	// Save initial state locally
+	require.NoError(t, store.SaveTasks("test-branch", tasks))
+	require.NoError(t, store.SaveState("test-branch", initialState))
+
+	// Create config with max 1 iteration to run only once
+	cfg := &config.Config{
+		Limits: config.Limits{
+			MaxIterations:       1, // Only run one iteration
+			MaxBudgetUSD:        0.50,
+			MaxDurationHours:    1,
+			NoProgressThreshold: 3,
+		},
+	}
+
+	// Create session
+	session := &config.Session{
+		Repo:       "test-org/test-repo",
+		Branch:     "test-branch",
+		SpriteName: spriteName,
+		StartedAt:  time.Now(),
+		Status:     config.SessionStatusRunning,
+	}
+	require.NoError(t, store.CreateSession(session))
+
+	// Create TUI that writes to discard (no terminal for tests)
+	testTUI := createTestTUI()
+
+	// Find template dir
+	projectRoot := testutil.FindProjectRoot(t)
+	require.NotEmpty(t, projectRoot, "could not find project root")
+	templateDir := filepath.Join(projectRoot, ".wisp", "templates", "default")
+
+	// Create ClaudeConfig with test-appropriate settings
+	// Use enough turns for the task but not excessive
+	claudeCfg := loop.ClaudeConfig{
+		MaxTurns:     20, // Enough turns to complete a simple task
+		MaxBudget:    0.50,
+		Verbose:      true,
+		OutputFormat: "stream-json",
+	}
+
+	// Create Loop using NewLoopWithOptions with production-like config
+	l := loop.NewLoopWithOptions(loop.LoopOptions{
+		Client:       env.Client,
+		SyncManager:  syncMgr,
+		Store:        store,
+		Config:       cfg,
+		Session:      session,
+		TUI:          testTUI,
+		RepoPath:     repoPath,
+		TemplateDir:  templateDir,
+		ClaudeConfig: claudeCfg,
+	})
+
+	// Run loop (will execute exactly 1 iteration due to MaxIterations=1)
+	t.Log("Running loop with production code path...")
+	result := l.Run(ctx)
+
+	t.Logf("Loop result: reason=%s, iterations=%d", result.Reason, result.Iterations)
+	if result.Error != nil {
+		t.Logf("Loop error: %v", result.Error)
+	}
+
+	// The loop should exit with MaxIterations (since we only run 1 iteration)
+	// or Done if the task completed in that single iteration
+	assert.Contains(t, []loop.ExitReason{loop.ExitReasonMaxIterations, loop.ExitReasonDone}, result.Reason,
+		"loop should exit with MaxIterations or Done")
+	assert.Equal(t, 1, result.Iterations, "should have run exactly 1 iteration")
+
+	// Verify state.json via local store (synced from Sprite)
+	finalState, err := store.LoadState("test-branch")
+	require.NoError(t, err, "should be able to load final state")
 	t.Logf("Final state: status=%s, summary=%s", finalState.Status, finalState.Summary)
 	assert.Contains(t, []string{state.StatusContinue, state.StatusDone}, finalState.Status,
 		"status should be CONTINUE or DONE")
 
-	// Verify tasks.json
-	finalTasks := readTasksFromSprite(t, env.Client, spriteName, repoPath)
+	// Verify tasks.json via local store
+	finalTasks, err := store.LoadTasks("test-branch")
+	require.NoError(t, err, "should be able to load final tasks")
 	require.Len(t, finalTasks, 1, "should have 1 task")
 	assert.True(t, finalTasks[0].Passes, "task should be marked as passes: true")
 
-	// Verify hello.txt exists with correct content
+	// Verify hello.txt exists with correct content on Sprite
 	helloContent, err := env.Client.ReadFile(ctx, spriteName, filepath.Join(repoPath, "hello.txt"))
 	require.NoError(t, err, "hello.txt should exist")
 	assert.Contains(t, string(helloContent), "Hello, World!", "hello.txt should contain expected content")
@@ -290,6 +369,11 @@ func TestRealSprite_SingleIterationWithClaude(t *testing.T) {
 	assert.Equal(t, 0, exitCode, "git log should succeed")
 	assert.NotEmpty(t, stdout, "should have at least one commit")
 	t.Logf("Latest commit: %s", strings.TrimSpace(string(stdout)))
+
+	// Verify history was recorded
+	history, err := store.LoadHistory("test-branch")
+	require.NoError(t, err, "should be able to load history")
+	assert.Len(t, history, 1, "should have 1 history entry for 1 iteration")
 }
 
 // TestRealSprite_FullLoopCompletion verifies the full loop runs to completion with ExitReasonDone.
