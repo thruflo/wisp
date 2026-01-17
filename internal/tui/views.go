@@ -89,7 +89,20 @@ func NewTailView(maxLines int) *TailView {
 }
 
 // Append adds a line to the tail view buffer.
+// If line contains newlines, it's split into multiple lines.
 func (v *TailView) Append(line string) {
+	// Split on newlines to avoid staircase effect in raw terminal mode
+	if strings.Contains(line, "\n") {
+		for _, part := range strings.Split(line, "\n") {
+			v.appendSingle(part)
+		}
+	} else {
+		v.appendSingle(line)
+	}
+}
+
+// appendSingle adds a single line (no newlines) to the buffer.
+func (v *TailView) appendSingle(line string) {
 	v.lines = append(v.lines, line)
 	// Trim if we exceed max lines
 	if len(v.lines) > v.maxLines {
@@ -118,6 +131,7 @@ func (v *TailView) Lines() []string {
 
 // Render renders the tail view with a header showing how to exit.
 // height is the number of content lines to display (excluding header/footer).
+// Content is anchored at the bottom, filling upward like a real tail -f.
 func (v *TailView) Render(width, height int) []string {
 	if width < 20 {
 		width = 20
@@ -137,6 +151,14 @@ func (v *TailView) Render(width, height int) []string {
 	totalLines := len(v.lines)
 	visibleLines := height
 
+	// Pad at the TOP so content anchors at bottom
+	if totalLines < visibleLines {
+		for i := 0; i < visibleLines-totalLines; i++ {
+			result = append(result, "")
+		}
+	}
+
+	// Calculate start position for visible content
 	start := 0
 	if totalLines > visibleLines {
 		start = totalLines - visibleLines
@@ -149,11 +171,6 @@ func (v *TailView) Render(width, height int) []string {
 			line = line[:width]
 		}
 		result = append(result, line)
-	}
-
-	// Pad remaining space
-	for len(result) < height+1 {
-		result = append(result, "")
 	}
 
 	// Footer with line count
