@@ -1,13 +1,20 @@
 package testutil
 
 import (
+	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
+	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 	"github.com/thruflo/wisp/internal/config"
+	"github.com/thruflo/wisp/internal/sprite"
 	"github.com/thruflo/wisp/internal/state"
 )
 
@@ -187,4 +194,119 @@ func WriteTestFile(t *testing.T, basePath, relativePath string, content []byte) 
 	fullPath := filepath.Join(basePath, relativePath)
 	require.NoError(t, os.MkdirAll(filepath.Dir(fullPath), 0755))
 	require.NoError(t, os.WriteFile(fullPath, content, 0644))
+}
+
+// RealSpriteEnv holds credentials and client for real Sprite tests.
+type RealSpriteEnv struct {
+	SpriteToken string
+	GitHubToken string
+	Client      sprite.Client
+}
+
+// SetupRealSpriteEnv loads credentials and creates a real Sprite client.
+// Skips the test if SPRITE_TOKEN is not available or if running in short mode.
+func SetupRealSpriteEnv(t *testing.T) *RealSpriteEnv {
+	t.Helper()
+
+	if testing.Short() {
+		t.Skip("skipping real Sprite test in short mode")
+	}
+
+	creds := LoadTestCredentials(t)
+
+	return &RealSpriteEnv{
+		SpriteToken: creds.SpriteToken,
+		GitHubToken: creds.GitHubToken,
+		Client:      sprite.NewSDKClient(creds.SpriteToken),
+	}
+}
+
+// TrySetupRealSpriteEnv loads credentials and creates a client, returning nil
+// if credentials are not available. Useful for TestMain.
+func TrySetupRealSpriteEnv() *RealSpriteEnv {
+	creds := TryLoadTestCredentials()
+	if creds == nil {
+		return nil
+	}
+
+	return &RealSpriteEnv{
+		SpriteToken: creds.SpriteToken,
+		GitHubToken: creds.GitHubToken,
+		Client:      sprite.NewSDKClient(creds.SpriteToken),
+	}
+}
+
+// GenerateTestSpriteName creates a unique Sprite name for testing.
+// Format: wisp-test-{hash}-{timestamp} where hash is derived from the test name.
+// The name is kept short to comply with Sprite naming limits.
+func GenerateTestSpriteName(t *testing.T) string {
+	t.Helper()
+
+	// Create a short hash from test name for uniqueness across concurrent tests
+	h := sha256.Sum256([]byte(t.Name()))
+	hash := hex.EncodeToString(h[:])[:8]
+
+	// Use last 8 digits of Unix nano timestamp for uniqueness across runs
+	timestamp := time.Now().UnixNano() % 100000000
+
+	return fmt.Sprintf("wisp-test-%s-%d", hash, timestamp)
+}
+
+// CleanupSprite safely deletes a Sprite, logging but not failing on errors.
+// Use with t.Cleanup() to ensure Sprites are deleted after tests.
+func CleanupSprite(t *testing.T, client sprite.Client, name string) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	if err := client.Delete(ctx, name); err != nil {
+		// Log but don't fail - the Sprite may already be deleted or never created
+		t.Logf("cleanup: failed to delete Sprite %s: %v", name, err)
+	} else {
+		t.Logf("cleanup: deleted Sprite %s", name)
+	}
+}
+
+// WaitForSpriteReady polls until the Sprite can execute commands.
+// Returns error if the Sprite isn't ready within maxWait.
+func WaitForSpriteReady(t *testing.T, client sprite.Client, name string, maxWait time.Duration) error {
+	t.Helper()
+
+	deadline := time.Now().Add(maxWait)
+	pollInterval := 1 * time.Second
+
+	for time.Now().Before(deadline) {
+		// Try to execute a simple command with a short timeout
+		ready := make(chan bool, 1)
+		go func() {
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			cmd, err := client.Execute(ctx, name, "", nil, "echo", "ready")
+			if err != nil {
+				ready <- false
+				return
+			}
+			// Read output in goroutine to avoid blocking
+			go io.Copy(io.Discard, cmd.Stdout)
+			go io.Copy(io.Discard, cmd.Stderr)
+			if cmd.Wait() == nil {
+				ready <- true
+				return
+			}
+			ready <- false
+		}()
+
+		select {
+		case isReady := <-ready:
+			if isReady {
+				t.Logf("sprite %s ready after %v", name, maxWait-time.Until(deadline))
+				return nil
+			}
+		case <-time.After(6 * time.Second):
+			// Timeout on this attempt, try again
+		}
+		time.Sleep(pollInterval)
+	}
+
+	return fmt.Errorf("sprite %s not ready after %v", name, maxWait)
 }

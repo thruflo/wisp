@@ -21,8 +21,6 @@ package integration
 import (
 	"context"
 	"encoding/json"
-	"fmt"
-	"io"
 	"os"
 	"path/filepath"
 	"testing"
@@ -30,201 +28,60 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"github.com/thruflo/wisp/internal/config"
-	"github.com/thruflo/wisp/internal/sprite"
 	"github.com/thruflo/wisp/internal/state"
+	"github.com/thruflo/wisp/internal/testutil"
 )
-
-// realSpriteEnv holds credentials and client for real Sprite tests.
-type realSpriteEnv struct {
-	SpriteToken string
-	GitHubToken string
-	client      sprite.Client
-}
-
-// setupRealSpriteEnv loads credentials and creates a real Sprite client.
-// Skips the test if SPRITE_TOKEN is not available.
-func setupRealSpriteEnv(t *testing.T) *realSpriteEnv {
-	t.Helper()
-
-	if testing.Short() {
-		t.Skip("skipping real Sprite test in short mode")
-	}
-
-	env := &realSpriteEnv{}
-
-	// Try loading from .wisp/.sprite.env at project root
-	projectRoot := findProjectRoot(t)
-	if projectRoot != "" {
-		envVars, err := config.LoadEnvFile(projectRoot)
-		if err == nil {
-			env.SpriteToken = envVars["SPRITE_TOKEN"]
-			env.GitHubToken = envVars["GITHUB_TOKEN"]
-		}
-	}
-
-	// Fall back to environment variables (for CI/CD)
-	if env.SpriteToken == "" {
-		env.SpriteToken = os.Getenv("SPRITE_TOKEN")
-	}
-	if env.GitHubToken == "" {
-		env.GitHubToken = os.Getenv("GITHUB_TOKEN")
-	}
-
-	// Skip if no token available
-	if env.SpriteToken == "" {
-		t.Skip("SPRITE_TOKEN not available, skipping real Sprite test")
-	}
-
-	// Create real client (never log the token)
-	env.client = sprite.NewSDKClient(env.SpriteToken)
-
-	return env
-}
-
-// findProjectRoot walks up from the current directory to find the .wisp directory.
-func findProjectRoot(t *testing.T) string {
-	t.Helper()
-
-	// Start from the current working directory
-	dir, err := os.Getwd()
-	if err != nil {
-		return ""
-	}
-
-	// Walk up looking for .wisp directory
-	for {
-		wispDir := filepath.Join(dir, ".wisp")
-		if info, err := os.Stat(wispDir); err == nil && info.IsDir() {
-			return dir
-		}
-
-		parent := filepath.Dir(dir)
-		if parent == dir {
-			// Reached root
-			return ""
-		}
-		dir = parent
-	}
-}
-
-// generateTestSpriteName creates a unique Sprite name for testing.
-// Includes timestamp to prevent collisions between test runs.
-func generateTestSpriteName(t *testing.T, suffix string) string {
-	t.Helper()
-	timestamp := time.Now().UnixNano()
-	// Keep name short but unique: wisp-test-<suffix>-<timestamp-last-8-digits>
-	return fmt.Sprintf("wisp-test-%s-%d", suffix, timestamp%100000000)
-}
-
-// cleanupSprite safely deletes a Sprite, logging but not failing on errors.
-func cleanupSprite(t *testing.T, client sprite.Client, name string) {
-	t.Helper()
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-
-	if err := client.Delete(ctx, name); err != nil {
-		// Log but don't fail - the Sprite may already be deleted or never created
-		t.Logf("cleanup: failed to delete Sprite %s: %v", name, err)
-	} else {
-		t.Logf("cleanup: deleted Sprite %s", name)
-	}
-}
-
-// waitForSpriteReady polls until the sprite can execute commands.
-// Returns error if sprite isn't ready within maxWait.
-func waitForSpriteReady(t *testing.T, client sprite.Client, name string, maxWait time.Duration) error {
-	t.Helper()
-
-	deadline := time.Now().Add(maxWait)
-	pollInterval := 1 * time.Second
-
-	for time.Now().Before(deadline) {
-		// Try to execute a simple command with a short timeout
-		ready := make(chan bool, 1)
-		go func() {
-			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-			defer cancel()
-			cmd, err := client.Execute(ctx, name, "", nil, "echo", "ready")
-			if err != nil {
-				ready <- false
-				return
-			}
-			// Read output in goroutine to avoid blocking
-			go io.Copy(io.Discard, cmd.Stdout)
-			go io.Copy(io.Discard, cmd.Stderr)
-			if cmd.Wait() == nil {
-				ready <- true
-				return
-			}
-			ready <- false
-		}()
-
-		select {
-		case isReady := <-ready:
-			if isReady {
-				t.Logf("sprite %s ready after %v", name, maxWait-time.Until(deadline))
-				return nil
-			}
-		case <-time.After(6 * time.Second):
-			// Timeout on this attempt, try again
-		}
-		time.Sleep(pollInterval)
-	}
-
-	return fmt.Errorf("sprite %s not ready after %v", name, maxWait)
-}
 
 // TestRealSprite_CreateAndDelete tests creating and deleting a real Sprite.
 func TestRealSprite_CreateAndDelete(t *testing.T) {
-	env := setupRealSpriteEnv(t)
+	env := testutil.SetupRealSpriteEnv(t)
 
-	spriteName := generateTestSpriteName(t, "create")
+	spriteName := testutil.GenerateTestSpriteName(t)
 	t.Logf("testing with Sprite: %s", spriteName)
 
 	// Ensure cleanup happens even if test fails
 	t.Cleanup(func() {
-		cleanupSprite(t, env.client, spriteName)
+		testutil.CleanupSprite(t, env.Client, spriteName)
 	})
 
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
 
 	// Create the Sprite
-	err := env.client.Create(ctx, spriteName, "")
+	err := env.Client.Create(ctx, spriteName, "")
 	require.NoError(t, err, "failed to create Sprite")
 
 	// Verify it exists
-	exists, err := env.client.Exists(ctx, spriteName)
+	exists, err := env.Client.Exists(ctx, spriteName)
 	require.NoError(t, err, "failed to check Sprite existence")
 	assert.True(t, exists, "Sprite should exist after creation")
 
 	// Delete the Sprite
-	err = env.client.Delete(ctx, spriteName)
+	err = env.Client.Delete(ctx, spriteName)
 	require.NoError(t, err, "failed to delete Sprite")
 
 	// Verify it's gone
-	exists, err = env.client.Exists(ctx, spriteName)
+	exists, err = env.Client.Exists(ctx, spriteName)
 	require.NoError(t, err, "failed to check Sprite existence after deletion")
 	assert.False(t, exists, "Sprite should not exist after deletion")
 }
 
 // TestRealSprite_WriteReadFile tests writing and reading files on a real Sprite.
 func TestRealSprite_WriteReadFile(t *testing.T) {
-	env := setupRealSpriteEnv(t)
+	env := testutil.SetupRealSpriteEnv(t)
 
-	spriteName := generateTestSpriteName(t, "file")
+	spriteName := testutil.GenerateTestSpriteName(t)
 	t.Logf("testing with Sprite: %s", spriteName)
 
 	t.Cleanup(func() {
-		cleanupSprite(t, env.client, spriteName)
+		testutil.CleanupSprite(t, env.Client, spriteName)
 	})
 
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
 
 	// Create the Sprite
-	err := env.client.Create(ctx, spriteName, "")
+	err := env.Client.Create(ctx, spriteName, "")
 	require.NoError(t, err, "failed to create Sprite")
 
 	// Test data
@@ -239,11 +96,11 @@ func TestRealSprite_WriteReadFile(t *testing.T) {
 
 	// Write file
 	filePath := "/tmp/test-config.json"
-	err = env.client.WriteFile(ctx, spriteName, filePath, content)
+	err = env.Client.WriteFile(ctx, spriteName, filePath, content)
 	require.NoError(t, err, "failed to write file to Sprite")
 
 	// Read file back
-	readContent, err := env.client.ReadFile(ctx, spriteName, filePath)
+	readContent, err := env.Client.ReadFile(ctx, spriteName, filePath)
 	require.NoError(t, err, "failed to read file from Sprite")
 
 	// Verify content matches
@@ -259,33 +116,74 @@ func TestRealSprite_WriteReadFile(t *testing.T) {
 }
 
 // TestRealSprite_ExecuteCommand tests executing commands on a real Sprite.
-// SKIP: The SDK's pipe-based Execute has issues where pipes don't close properly,
-// causing io.ReadAll to block forever. The Filesystem API works correctly.
-// TODO: Investigate SDK pipe handling or use cmd.Output() directly.
+// Uses ExecuteOutput which avoids pipe handling issues with the SDK.
 func TestRealSprite_ExecuteCommand(t *testing.T) {
-	t.Skip("SDK pipe handling issue - pipes don't close, causing ReadAll to block")
-}
+	env := testutil.SetupRealSpriteEnv(t)
 
-// TestRealSprite_StateFileRoundTrip tests writing and reading state.json on a real Sprite.
-func TestRealSprite_StateFileRoundTrip(t *testing.T) {
-	env := setupRealSpriteEnv(t)
-
-	spriteName := generateTestSpriteName(t, "state")
+	spriteName := testutil.GenerateTestSpriteName(t)
 	t.Logf("testing with Sprite: %s", spriteName)
 
 	t.Cleanup(func() {
-		cleanupSprite(t, env.client, spriteName)
+		testutil.CleanupSprite(t, env.Client, spriteName)
 	})
 
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
 
 	// Create the Sprite
-	err := env.client.Create(ctx, spriteName, "")
+	err := env.Client.Create(ctx, spriteName, "")
+	require.NoError(t, err, "failed to create Sprite")
+
+	// Test 1: Simple echo command using ExecuteOutput (non-streaming)
+	stdout, stderr, exitCode, err := env.Client.ExecuteOutput(ctx, spriteName, "", nil, "echo", "hello world")
+	require.NoError(t, err, "ExecuteOutput should not error")
+	assert.Equal(t, 0, exitCode, "exit code should be 0")
+	assert.Contains(t, string(stdout), "hello world", "stdout should contain expected output")
+	assert.Empty(t, stderr, "stderr should be empty")
+
+	// Test 2: Command with non-zero exit code
+	stdout, stderr, exitCode, err = env.Client.ExecuteOutput(ctx, spriteName, "", nil, "bash", "-c", "exit 42")
+	require.NoError(t, err, "ExecuteOutput should not error even with non-zero exit")
+	assert.Equal(t, 42, exitCode, "exit code should be 42")
+
+	// Test 3: Command with directory
+	stdout, stderr, exitCode, err = env.Client.ExecuteOutput(ctx, spriteName, "/tmp", nil, "pwd")
+	require.NoError(t, err, "ExecuteOutput with dir should not error")
+	assert.Equal(t, 0, exitCode, "exit code should be 0")
+	assert.Contains(t, string(stdout), "/tmp", "should show /tmp as current directory")
+
+	// Test 4: Command with environment variables
+	stdout, stderr, exitCode, err = env.Client.ExecuteOutput(ctx, spriteName, "", []string{"MY_VAR=test_value"}, "bash", "-c", "echo $MY_VAR")
+	require.NoError(t, err, "ExecuteOutput with env should not error")
+	assert.Equal(t, 0, exitCode, "exit code should be 0")
+	assert.Contains(t, string(stdout), "test_value", "should show environment variable value")
+
+	// Note: Streaming Execute with pipes has known SDK issues where pipes don't close properly.
+	// Use ExecuteOutput for reliable command execution. The streaming Execute is still available
+	// for cases like Claude output where long-running streaming is needed, but the caller must
+	// handle the pipe lifecycle carefully.
+}
+
+// TestRealSprite_StateFileRoundTrip tests writing and reading state.json on a real Sprite.
+func TestRealSprite_StateFileRoundTrip(t *testing.T) {
+	env := testutil.SetupRealSpriteEnv(t)
+
+	spriteName := testutil.GenerateTestSpriteName(t)
+	t.Logf("testing with Sprite: %s", spriteName)
+
+	t.Cleanup(func() {
+		testutil.CleanupSprite(t, env.Client, spriteName)
+	})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+
+	// Create the Sprite
+	err := env.Client.Create(ctx, spriteName, "")
 	require.NoError(t, err, "failed to create Sprite")
 
 	// Create .wisp directory
-	cmd, err := env.client.Execute(ctx, spriteName, "", nil, "mkdir", "-p", "/tmp/repo/.wisp")
+	cmd, err := env.Client.Execute(ctx, spriteName, "", nil, "mkdir", "-p", "/tmp/repo/.wisp")
 	require.NoError(t, err)
 	require.NoError(t, cmd.Wait())
 
@@ -305,11 +203,11 @@ func TestRealSprite_StateFileRoundTrip(t *testing.T) {
 
 	// Write state.json
 	statePath := "/tmp/repo/.wisp/state.json"
-	err = env.client.WriteFile(ctx, spriteName, statePath, stateData)
+	err = env.Client.WriteFile(ctx, spriteName, statePath, stateData)
 	require.NoError(t, err, "failed to write state.json")
 
 	// Read state.json back
-	readData, err := env.client.ReadFile(ctx, spriteName, statePath)
+	readData, err := env.Client.ReadFile(ctx, spriteName, statePath)
 	require.NoError(t, err, "failed to read state.json")
 
 	// Unmarshal and verify
@@ -327,25 +225,25 @@ func TestRealSprite_StateFileRoundTrip(t *testing.T) {
 
 // TestRealSprite_SyncManagerIntegration tests the full SyncManager round-trip with a real Sprite.
 func TestRealSprite_SyncManagerIntegration(t *testing.T) {
-	env := setupRealSpriteEnv(t)
+	env := testutil.SetupRealSpriteEnv(t)
 
-	spriteName := generateTestSpriteName(t, "sync")
+	spriteName := testutil.GenerateTestSpriteName(t)
 	t.Logf("testing with Sprite: %s", spriteName)
 
 	t.Cleanup(func() {
-		cleanupSprite(t, env.client, spriteName)
+		testutil.CleanupSprite(t, env.Client, spriteName)
 	})
 
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
 
 	// Create the Sprite
-	err := env.client.Create(ctx, spriteName, "")
+	err := env.Client.Create(ctx, spriteName, "")
 	require.NoError(t, err, "failed to create Sprite")
 
 	// Create test directory structure on Sprite
 	repoPath := "/tmp/test-repo"
-	cmd, err := env.client.Execute(ctx, spriteName, "", nil, "mkdir", "-p", repoPath+"/.wisp")
+	cmd, err := env.Client.Execute(ctx, spriteName, "", nil, "mkdir", "-p", repoPath+"/.wisp")
 	require.NoError(t, err)
 	require.NoError(t, cmd.Wait())
 
@@ -356,7 +254,7 @@ func TestRealSprite_SyncManagerIntegration(t *testing.T) {
 
 	// Create local store and SyncManager
 	store := state.NewStore(tmpDir)
-	syncMgr := state.NewSyncManager(env.client, store)
+	syncMgr := state.NewSyncManager(env.Client, store)
 
 	branch := "test-branch"
 
@@ -390,15 +288,15 @@ func TestRealSprite_SyncManagerIntegration(t *testing.T) {
 	require.NoError(t, err, "failed to sync to Sprite")
 
 	// Verify files exist on Sprite by reading them directly
-	stateData, err := env.client.ReadFile(ctx, spriteName, repoPath+"/.wisp/state.json")
+	stateData, err := env.Client.ReadFile(ctx, spriteName, repoPath+"/.wisp/state.json")
 	require.NoError(t, err, "state.json should exist on Sprite")
 	assert.Contains(t, string(stateData), "NEEDS_INPUT")
 
-	tasksData, err := env.client.ReadFile(ctx, spriteName, repoPath+"/.wisp/tasks.json")
+	tasksData, err := env.Client.ReadFile(ctx, spriteName, repoPath+"/.wisp/tasks.json")
 	require.NoError(t, err, "tasks.json should exist on Sprite")
 	assert.Contains(t, string(tasksData), "Implement API endpoints")
 
-	historyData, err := env.client.ReadFile(ctx, spriteName, repoPath+"/.wisp/history.json")
+	historyData, err := env.Client.ReadFile(ctx, spriteName, repoPath+"/.wisp/history.json")
 	require.NoError(t, err, "history.json should exist on Sprite")
 	assert.Contains(t, string(historyData), "Initial setup")
 
@@ -409,7 +307,7 @@ func TestRealSprite_SyncManagerIntegration(t *testing.T) {
 	}
 	updatedStateData, err := json.MarshalIndent(updatedState, "", "  ")
 	require.NoError(t, err)
-	err = env.client.WriteFile(ctx, spriteName, repoPath+"/.wisp/state.json", updatedStateData)
+	err = env.Client.WriteFile(ctx, spriteName, repoPath+"/.wisp/state.json", updatedStateData)
 	require.NoError(t, err)
 
 	// Clear local state to verify sync works
