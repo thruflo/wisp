@@ -9,6 +9,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"github.com/thruflo/wisp/internal/config"
+	"github.com/thruflo/wisp/internal/sprite"
 	"github.com/thruflo/wisp/internal/state"
 )
 
@@ -175,9 +176,9 @@ func TestStopCommand_RepoPathCalculation(t *testing.T) {
 		repo     string
 		expected string
 	}{
-		{"org/repo", "/home/sprite/org/repo"},
-		{"electric-sql/electric", "/home/sprite/electric-sql/electric"},
-		{"TanStack/db", "/home/sprite/TanStack/db"},
+		{"org/repo", filepath.Join(sprite.ReposDir, "org/repo")},
+		{"electric-sql/electric", filepath.Join(sprite.ReposDir, "electric-sql/electric")},
+		{"TanStack/db", filepath.Join(sprite.ReposDir, "TanStack/db")},
 	}
 
 	for _, tt := range tests {
@@ -194,7 +195,7 @@ func TestStopCommand_RepoPathCalculation(t *testing.T) {
 						break
 					}
 				}
-				result := filepath.Join("/home/sprite", org, name)
+				result := filepath.Join(sprite.ReposDir, org, name)
 				assert.Equal(t, tt.expected, result)
 			}
 		})

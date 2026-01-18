@@ -128,7 +128,7 @@ func runDone(cmd *cobra.Command, args []string) error {
 			// Calculate repo path
 			parts := strings.Split(session.Repo, "/")
 			if len(parts) == 2 {
-				repoPath = filepath.Join("/home/sprite", parts[0], parts[1])
+				repoPath = filepath.Join(sprite.ReposDir, parts[0], parts[1])
 
 				// Sync divergence.md from Sprite
 				if err := syncDivergenceFromSprite(ctx, client, session.SpriteName, repoPath, store, branch); err != nil {

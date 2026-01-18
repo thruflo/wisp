@@ -98,7 +98,7 @@ type Loop struct {
 	cfg         *config.Config
 	session     *config.Session
 	tui         *tui.TUI
-	repoPath    string // Path on Sprite: /home/sprite/<org>/<repo>
+	repoPath    string // Path on Sprite: /var/local/wisp/repos/<org>/<repo>
 	wispPath    string // Path on Sprite: <repoPath>/.wisp
 	iteration   int
 	startTime   time.Time
