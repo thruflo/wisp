@@ -156,7 +156,7 @@ func TestCountIncompleteTasks(t *testing.T) {
 	}
 }
 
-func TestBuildPRTitle(t *testing.T) {
+func TestBuildFallbackPRTitle(t *testing.T) {
 	tests := []struct {
 		name     string
 		tasks    []state.Task
@@ -169,14 +169,14 @@ func TestBuildPRTitle(t *testing.T) {
 				{Category: "feature", Description: "Add user authentication"},
 				{Category: "feature", Description: "Add user profile page"},
 			},
-			expected: "Add user authentication",
+			expected: "feat: add user authentication",
 		},
 		{
 			name: "truncates long description",
 			tasks: []state.Task{
-				{Category: "feature", Description: "This is a very long description that exceeds the maximum allowed length for a PR title and should be truncated"},
+				{Category: "feature", Description: "This is a very long description that exceeds the maximum allowed length for a PR title"},
 			},
-			expected: "This is a very long description that exceeds the maximum allowed leng...",
+			expected: "feat: this is a very long description that exceeds the maximum allow...",
 		},
 		{
 			name: "fallback for no features",
@@ -184,44 +184,32 @@ func TestBuildPRTitle(t *testing.T) {
 				{Category: "setup", Description: "Initialize project"},
 				{Category: "test", Description: "Add unit tests"},
 			},
-			expected: "Implement setup, test",
-		},
-		{
-			name: "multiple of same category",
-			tasks: []state.Task{
-				{Category: "feature", Description: ""},
-				{Category: "feature", Description: ""},
-				{Category: "feature", Description: ""},
-			},
-			expected: "Implement 3 feature tasks",
+			expected: "Implementation complete",
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			result := buildPRTitle(tt.tasks)
+			result := buildFallbackPRTitle(tt.tasks)
 			assert.Equal(t, tt.expected, result)
 		})
 	}
 }
 
-func TestBuildPRBody(t *testing.T) {
+func TestBuildFallbackPRBody(t *testing.T) {
 	tasks := []state.Task{
 		{Category: "setup", Description: "Initialize project", Passes: true},
 		{Category: "feature", Description: "Add authentication", Passes: true},
 		{Category: "test", Description: "Add unit tests", Passes: true},
 	}
 
-	body := buildPRBody(tasks)
+	body := buildFallbackPRBody(tasks)
 
 	// Verify body contains expected sections
 	assert.Contains(t, body, "## Summary")
-	assert.Contains(t, body, "## Tasks")
-	assert.Contains(t, body, "**[setup]** Initialize project")
-	assert.Contains(t, body, "**[feature]** Add authentication")
 	assert.Contains(t, body, "- [x] Initialize project")
 	assert.Contains(t, body, "- [x] Add authentication")
-	assert.Contains(t, body, "**3/3 tasks completed**")
+	assert.Contains(t, body, "- [x] Add unit tests")
 	assert.Contains(t, body, "Generated with [wisp]")
 }
 

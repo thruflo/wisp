@@ -3,12 +3,12 @@ package cli
 import (
 	"bufio"
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
-	"sort"
 	"strings"
 
 	"github.com/spf13/cobra"
@@ -160,7 +160,7 @@ func runDone(cmd *cobra.Command, args []string) error {
 	case PRModeAuto:
 		fmt.Printf("Creating PR automatically...\n")
 		if spriteExists && client != nil && repoPath != "" {
-			prURL, err := createPROnSprite(ctx, client, session.SpriteName, repoPath, session.Branch, tasks, env)
+			prURL, err := createPROnSprite(ctx, client, session.SpriteName, repoPath, session.Branch, tasks, env, session.Spec)
 			if err != nil {
 				return fmt.Errorf("failed to create PR: %w", err)
 			}
@@ -302,11 +302,25 @@ func promptPRMode() PRMode {
 	}
 }
 
-// createPROnSprite runs gh pr create on the Sprite to create a PR.
-func createPROnSprite(ctx context.Context, client sprite.Client, spriteName, repoPath, branch string, tasks []state.Task, env map[string]string) (string, error) {
-	// Build PR title and body from task summaries
-	title := buildPRTitle(tasks)
-	body := buildPRBody(tasks)
+// PRContent holds the LLM-generated PR title and body.
+type PRContent struct {
+	Title string `json:"title"`
+	Body  string `json:"body"`
+}
+
+// createPROnSprite generates PR content using Claude and creates a PR via gh CLI.
+func createPROnSprite(ctx context.Context, client sprite.Client, spriteName, repoPath, branch string, tasks []state.Task, env map[string]string, specPath string) (string, error) {
+	// Generate PR content using Claude
+	fmt.Printf("Generating PR description...\n")
+	prContent, err := generatePRContent(ctx, client, spriteName, repoPath)
+	if err != nil {
+		// Fall back to simple title if LLM generation fails
+		fmt.Printf("Warning: LLM PR generation failed (%v), using fallback\n", err)
+		prContent = &PRContent{
+			Title: buildFallbackPRTitle(tasks),
+			Body:  buildFallbackPRBody(tasks),
+		}
+	}
 
 	// Build environment with GITHUB_TOKEN
 	cmdEnv := []string{}
@@ -320,8 +334,8 @@ func createPROnSprite(ctx context.Context, client sprite.Client, spriteName, rep
 	// Run gh pr create
 	stdout, stderr, exitCode, err := client.ExecuteOutput(ctx, spriteName, repoPath, cmdEnv,
 		"gh", "pr", "create",
-		"--title", title,
-		"--body", body,
+		"--title", prContent.Title,
+		"--body", prContent.Body,
 	)
 	if err != nil {
 		return "", fmt.Errorf("failed to execute gh pr create: %w", err)
@@ -334,67 +348,70 @@ func createPROnSprite(ctx context.Context, client sprite.Client, spriteName, rep
 	return prURL, nil
 }
 
-// buildPRTitle generates a PR title from tasks.
-func buildPRTitle(tasks []state.Task) string {
-	// Use the first feature task's description, or fallback
+// generatePRContent runs Claude to generate PR title and body from spec and tasks.
+func generatePRContent(ctx context.Context, client sprite.Client, spriteName, repoPath string) (*PRContent, error) {
+	generatePRPath := filepath.Join(sprite.TemplatesDir, "generate-pr.md")
+	contextPath := filepath.Join(sprite.TemplatesDir, "context.md")
+	prOutputPath := filepath.Join(sprite.SessionDir, "pr.json")
+
+	// Build and run Claude command
+	args := sprite.ClaudePromptCommand(generatePRPath, "", contextPath, 10)
+	stdout, stderr, exitCode, err := client.ExecuteOutput(ctx, spriteName, repoPath, nil, args...)
+	if err != nil {
+		return nil, fmt.Errorf("failed to run claude: %w", err)
+	}
+
+	// Read the generated PR content
+	content, err := client.ReadFile(ctx, spriteName, prOutputPath)
+	if err != nil {
+		return nil, fmt.Errorf("pr.json not found after claude (exit %d): %w\nstdout: %s\nstderr: %s",
+			exitCode, err, string(stdout), string(stderr))
+	}
+
+	if len(content) == 0 {
+		return nil, fmt.Errorf("pr.json is empty after claude (exit %d)", exitCode)
+	}
+
+	var prContent PRContent
+	if err := json.Unmarshal(content, &prContent); err != nil {
+		return nil, fmt.Errorf("failed to parse pr.json: %w", err)
+	}
+
+	if prContent.Title == "" {
+		return nil, fmt.Errorf("pr.json has empty title")
+	}
+
+	return &prContent, nil
+}
+
+// buildFallbackPRTitle generates a simple PR title when LLM fails.
+func buildFallbackPRTitle(tasks []state.Task) string {
 	for _, t := range tasks {
 		if t.Category == "feature" && t.Description != "" {
-			// Truncate if too long
 			title := t.Description
-			if len(title) > 72 {
-				title = title[:69] + "..."
+			if len(title) > 65 {
+				title = title[:62] + "..."
 			}
-			return title
+			return "feat: " + strings.ToLower(title[:1]) + title[1:]
 		}
-	}
-
-	// Fallback: count tasks by category
-	categories := make(map[string]int)
-	for _, t := range tasks {
-		categories[t.Category]++
-	}
-
-	parts := []string{}
-	for cat, count := range categories {
-		if count == 1 {
-			parts = append(parts, cat)
-		} else {
-			parts = append(parts, fmt.Sprintf("%d %s tasks", count, cat))
-		}
-	}
-	sort.Strings(parts)
-
-	if len(parts) > 0 {
-		return "Implement " + strings.Join(parts, ", ")
 	}
 	return "Implementation complete"
 }
 
-// buildPRBody generates a PR body from tasks.
-func buildPRBody(tasks []state.Task) string {
+// buildFallbackPRBody generates a simple PR body when LLM fails.
+func buildFallbackPRBody(tasks []state.Task) string {
 	var body strings.Builder
+	body.WriteString("## Summary\n\nThis PR implements the following tasks:\n\n")
 
-	body.WriteString("## Summary\n\n")
-	body.WriteString("This PR implements the following tasks:\n\n")
-
-	for _, t := range tasks {
-		body.WriteString(fmt.Sprintf("- **[%s]** %s\n", t.Category, t.Description))
-	}
-
-	body.WriteString("\n## Tasks\n\n")
-	completed := 0
 	for _, t := range tasks {
 		if t.Passes {
 			body.WriteString(fmt.Sprintf("- [x] %s\n", t.Description))
-			completed++
 		} else {
 			body.WriteString(fmt.Sprintf("- [ ] %s\n", t.Description))
 		}
 	}
 
-	body.WriteString(fmt.Sprintf("\n**%d/%d tasks completed**\n", completed, len(tasks)))
 	body.WriteString("\n---\n🤖 Generated with [wisp](https://github.com/thruflo/wisp)\n")
-
 	return body.String()
 }
 
