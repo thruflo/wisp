@@ -26,6 +26,7 @@ var (
 	startTemplate    string
 	startCheckpoint  string
 	startHeadless    bool
+	startContinue    bool
 )
 
 // HeadlessResult is the JSON output format for headless mode.
@@ -64,6 +65,7 @@ func init() {
 	startCmd.Flags().StringVarP(&startTemplate, "template", "t", "default", "template name to use")
 	startCmd.Flags().StringVarP(&startCheckpoint, "checkpoint", "c", "", "checkpoint ID to restore from")
 	startCmd.Flags().BoolVar(&startHeadless, "headless", false, "run without TUI, print JSON result to stdout (for testing/CI)")
+	startCmd.Flags().BoolVar(&startContinue, "continue", false, "continue on existing branch instead of creating new")
 
 	startCmd.MarkFlagRequired("repo")
 	startCmd.MarkFlagRequired("spec")
@@ -80,6 +82,17 @@ func runStart(cmd *cobra.Command, args []string) error {
 	cwd, err := os.Getwd()
 	if err != nil {
 		return fmt.Errorf("failed to get current directory: %w", err)
+	}
+
+	// Parse repo and ref from --repo flag (supports org/repo@ref syntax)
+	repo, ref := config.ParseRepoRef(startRepo)
+
+	// Validate flag combinations
+	if startContinue && startBranch == "" {
+		return fmt.Errorf("--continue requires --branch")
+	}
+	if startContinue && ref != "" {
+		return fmt.Errorf("--continue and @ref are mutually exclusive")
 	}
 
 	// Load configuration
@@ -116,18 +129,21 @@ func runStart(cmd *cobra.Command, args []string) error {
 	}
 
 	// Generate sprite name
-	spriteName := sprite.GenerateSpriteName(startRepo, branch)
+	spriteName := sprite.GenerateSpriteName(repo, branch)
 
-	// Convert sibling repo strings to SiblingRepo structs
+	// Convert sibling repo strings to SiblingRepo structs (with @ref parsing)
 	var siblings []config.SiblingRepo
 	for _, s := range startSiblingRepo {
-		siblings = append(siblings, config.SiblingRepo{Repo: s})
+		sibRepo, sibRef := config.ParseRepoRef(s)
+		siblings = append(siblings, config.SiblingRepo{Repo: sibRepo, Ref: sibRef})
 	}
 
 	// Create session
 	session := &config.Session{
-		Repo:       startRepo,
+		Repo:       repo,
+		Ref:        ref,
 		Spec:       startSpec,
+		Continue:   startContinue,
 		Siblings:   siblings,
 		Checkpoint: startCheckpoint,
 		Branch:     branch,
