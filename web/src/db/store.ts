@@ -12,7 +12,7 @@ export interface CreateDbOptions {
 export function createDb({ token, onDisconnect }: CreateDbOptions) {
   return createStreamDB({
     streamOptions: {
-      url: '/stream',
+      url: `${window.location.origin}/stream`,
       headers: { Authorization: `Bearer ${token}` },
       onError: (error) => {
         // For connection errors (server gone), trigger disconnect

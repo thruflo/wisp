@@ -1,4 +1,4 @@
-import { createOptimisticAction } from '@tanstack/db'
+import { createOptimisticAction } from '@tanstack/react-db'
 import type { WispDB } from './store'
 
 export function createActions(db: WispDB, token: string) {

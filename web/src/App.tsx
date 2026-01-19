@@ -50,7 +50,6 @@ export function App() {
           if (cancelled) return
           setError(err.message)
           setConnectionState('error')
-          setToken(null)
         })
       return () => {
         cancelled = true
