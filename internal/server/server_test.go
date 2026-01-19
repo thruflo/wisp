@@ -7,7 +7,6 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
-	"net/url"
 	"strings"
 	"sync"
 	"testing"
@@ -252,8 +251,8 @@ func TestHandleAuth(t *testing.T) {
 	})
 
 	t.Run("missing password", func(t *testing.T) {
-		req := httptest.NewRequest(http.MethodPost, "/auth", nil)
-		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		req := httptest.NewRequest(http.MethodPost, "/auth", strings.NewReader(`{}`))
+		req.Header.Set("Content-Type", "application/json")
 		w := httptest.NewRecorder()
 
 		mux.ServeHTTP(w, req)
@@ -264,10 +263,8 @@ func TestHandleAuth(t *testing.T) {
 	})
 
 	t.Run("wrong password", func(t *testing.T) {
-		form := url.Values{}
-		form.Add("password", "wrong-password")
-		req := httptest.NewRequest(http.MethodPost, "/auth", strings.NewReader(form.Encode()))
-		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		req := httptest.NewRequest(http.MethodPost, "/auth", strings.NewReader(`{"password":"wrong-password"}`))
+		req.Header.Set("Content-Type", "application/json")
 		w := httptest.NewRecorder()
 
 		mux.ServeHTTP(w, req)
@@ -278,10 +275,9 @@ func TestHandleAuth(t *testing.T) {
 	})
 
 	t.Run("correct password", func(t *testing.T) {
-		form := url.Values{}
-		form.Add("password", testPassword)
-		req := httptest.NewRequest(http.MethodPost, "/auth", strings.NewReader(form.Encode()))
-		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		body := fmt.Sprintf(`{"password":"%s"}`, testPassword)
+		req := httptest.NewRequest(http.MethodPost, "/auth", strings.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
 		w := httptest.NewRecorder()
 
 		mux.ServeHTTP(w, req)
@@ -411,9 +407,8 @@ func TestAuthEndToEnd(t *testing.T) {
 	addr := server.ListenAddr()
 
 	// Authenticate with correct password
-	form := url.Values{}
-	form.Add("password", testPassword)
-	resp, err := http.PostForm("http://"+addr+"/auth", form)
+	body := fmt.Sprintf(`{"password":"%s"}`, testPassword)
+	resp, err := http.Post("http://"+addr+"/auth", "application/json", strings.NewReader(body))
 	if err != nil {
 		t.Fatalf("failed to authenticate: %v", err)
 	}
@@ -436,9 +431,7 @@ func TestAuthEndToEnd(t *testing.T) {
 	}
 
 	// Authenticate with wrong password
-	form = url.Values{}
-	form.Add("password", "wrong-password")
-	resp2, err := http.PostForm("http://"+addr+"/auth", form)
+	resp2, err := http.Post("http://"+addr+"/auth", "application/json", strings.NewReader(`{"password":"wrong-password"}`))
 	if err != nil {
 		t.Fatalf("failed to make request: %v", err)
 	}
@@ -452,9 +445,8 @@ func TestAuthEndToEnd(t *testing.T) {
 // Helper to get an authenticated token for tests
 func getAuthToken(t *testing.T, addr string) string {
 	t.Helper()
-	form := url.Values{}
-	form.Add("password", testPassword)
-	resp, err := http.PostForm("http://"+addr+"/auth", form)
+	body := fmt.Sprintf(`{"password":"%s"}`, testPassword)
+	resp, err := http.Post("http://"+addr+"/auth", "application/json", strings.NewReader(body))
 	if err != nil {
 		t.Fatalf("failed to authenticate: %v", err)
 	}

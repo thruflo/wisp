@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"net/url"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -53,8 +52,8 @@ func TestIntegrationAuthFlow(t *testing.T) {
 
 	t.Run("correct_password_returns_valid_token", func(t *testing.T) {
 		// Authenticate with correct password
-		form := url.Values{"password": {testPassword}}
-		resp, err := http.PostForm("http://"+addr+"/auth", form)
+		body := fmt.Sprintf(`{"password":"%s"}`, testPassword)
+		resp, err := http.Post("http://"+addr+"/auth", "application/json", strings.NewReader(body))
 		require.NoError(t, err)
 		defer resp.Body.Close()
 
@@ -78,8 +77,7 @@ func TestIntegrationAuthFlow(t *testing.T) {
 	})
 
 	t.Run("incorrect_password_returns_401", func(t *testing.T) {
-		form := url.Values{"password": {"wrong-password"}}
-		resp, err := http.PostForm("http://"+addr+"/auth", form)
+		resp, err := http.Post("http://"+addr+"/auth", "application/json", strings.NewReader(`{"password":"wrong-password"}`))
 		require.NoError(t, err)
 		defer resp.Body.Close()
 
@@ -87,8 +85,7 @@ func TestIntegrationAuthFlow(t *testing.T) {
 	})
 
 	t.Run("empty_password_returns_400", func(t *testing.T) {
-		form := url.Values{"password": {""}}
-		resp, err := http.PostForm("http://"+addr+"/auth", form)
+		resp, err := http.Post("http://"+addr+"/auth", "application/json", strings.NewReader(`{"password":""}`))
 		require.NoError(t, err)
 		defer resp.Body.Close()
 
@@ -118,8 +115,8 @@ func TestIntegrationAuthFlow(t *testing.T) {
 		// Get multiple tokens
 		var tokens []string
 		for i := 0; i < 3; i++ {
-			form := url.Values{"password": {testPassword}}
-			resp, err := http.PostForm("http://"+addr+"/auth", form)
+			body := fmt.Sprintf(`{"password":"%s"}`, testPassword)
+			resp, err := http.Post("http://"+addr+"/auth", "application/json", strings.NewReader(body))
 			require.NoError(t, err)
 
 			var authResp struct {
@@ -852,8 +849,8 @@ func TestIntegrationServerLifecycle(t *testing.T) {
 		require.NotEmpty(t, addr)
 
 		// Verify working
-		form := url.Values{"password": {testPassword}}
-		resp, err := http.PostForm("http://"+addr+"/auth", form)
+		body := fmt.Sprintf(`{"password":"%s"}`, testPassword)
+		resp, err := http.Post("http://"+addr+"/auth", "application/json", strings.NewReader(body))
 		require.NoError(t, err)
 		assert.Equal(t, http.StatusOK, resp.StatusCode)
 		resp.Body.Close()
@@ -873,7 +870,7 @@ func TestIntegrationServerLifecycle(t *testing.T) {
 
 		// Should be stopped - connection should be refused
 		client := &http.Client{Timeout: 1 * time.Second}
-		_, err = client.PostForm("http://"+addr+"/auth", form)
+		_, err = client.Post("http://"+addr+"/auth", "application/json", strings.NewReader(body))
 		assert.Error(t, err, "expected connection refused after server stop")
 	})
 
@@ -939,8 +936,8 @@ func TestIntegrationEndToEndFlow(t *testing.T) {
 	addr := server.ListenAddr()
 
 	// Step 1: Authenticate
-	form := url.Values{"password": {testPassword}}
-	resp, err := http.PostForm("http://"+addr+"/auth", form)
+	authBody := fmt.Sprintf(`{"password":"%s"}`, testPassword)
+	resp, err := http.Post("http://"+addr+"/auth", "application/json", strings.NewReader(authBody))
 	require.NoError(t, err)
 	var authResp struct {
 		Token string `json:"token"`

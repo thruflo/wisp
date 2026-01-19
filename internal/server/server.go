@@ -789,17 +789,27 @@ func (s *Server) handleAuth(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Parse form data
-	if err := r.ParseForm(); err != nil {
-		http.Error(w, "invalid request", http.StatusBadRequest)
+	// Parse JSON body
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
+		http.Error(w, "failed to read body", http.StatusBadRequest)
 		return
 	}
 
-	password := r.FormValue("password")
-	if password == "" {
+	var req struct {
+		Password string `json:"password"`
+	}
+	if err := json.Unmarshal(body, &req); err != nil {
+		http.Error(w, "invalid JSON", http.StatusBadRequest)
+		return
+	}
+
+	if req.Password == "" {
 		http.Error(w, "password required", http.StatusBadRequest)
 		return
 	}
+
+	password := req.Password
 
 	// Verify password
 	valid, err := s.VerifyPassword(password)
