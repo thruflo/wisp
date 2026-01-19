@@ -6,11 +6,13 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/spf13/cobra"
 	"github.com/thruflo/wisp/internal/auth"
 	"github.com/thruflo/wisp/internal/config"
 	"github.com/thruflo/wisp/internal/loop"
+	"github.com/thruflo/wisp/internal/server"
 	"github.com/thruflo/wisp/internal/sprite"
 	"github.com/thruflo/wisp/internal/state"
 	"github.com/thruflo/wisp/internal/tui"
@@ -166,8 +168,51 @@ func runResume(cmd *cobra.Command, args []string) error {
 	// Get template directory
 	templateDir := filepath.Join(cwd, ".wisp", "templates", templateName)
 
+	// Create web server if enabled
+	var srv *server.Server
+	if resumeServer {
+		var err error
+		srv, err = server.NewServerFromConfig(cfg.Server)
+		if err != nil {
+			return fmt.Errorf("failed to create web server: %w", err)
+		}
+
+		// Start server in background
+		serverErrCh := make(chan error, 1)
+		go func() {
+			serverErrCh <- srv.Start(ctx)
+		}()
+
+		// Give the server a moment to start and check for errors
+		select {
+		case err := <-serverErrCh:
+			return fmt.Errorf("web server failed to start: %w", err)
+		case <-time.After(100 * time.Millisecond):
+			// Server started successfully
+		}
+
+		fmt.Printf("Web server running at http://localhost:%d\n", cfg.Server.Port)
+
+		// Ensure server is stopped when we exit
+		defer func() {
+			if err := srv.Stop(); err != nil {
+				fmt.Printf("Warning: failed to stop web server: %v\n", err)
+			}
+		}()
+	}
+
 	// Create and run loop
-	l := loop.NewLoop(client, syncMgr, store, cfg, session, t, repoPath, templateDir)
+	l := loop.NewLoopWithOptions(loop.LoopOptions{
+		Client:      client,
+		SyncManager: syncMgr,
+		Store:       store,
+		Config:      cfg,
+		Session:     session,
+		TUI:         t,
+		Server:      srv,
+		RepoPath:    repoPath,
+		TemplateDir: templateDir,
+	})
 
 	fmt.Printf("Resuming iteration loop...\n")
 
