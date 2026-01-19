@@ -21,8 +21,9 @@ func TestInitCommand(t *testing.T) {
 	err = os.Chdir(tmpDir)
 	require.NoError(t, err)
 
-	// Reset template flag to default
+	// Reset flags to default
 	initTemplate = "default"
+	initForce = false
 
 	// Run init command
 	err = runInit(initCmd, []string{})
@@ -129,8 +130,9 @@ func TestInitCommandWithCustomTemplate(t *testing.T) {
 	err = os.Chdir(tmpDir)
 	require.NoError(t, err)
 
-	// Set custom template name
+	// Set custom template name and reset force flag
 	initTemplate = "custom"
+	initForce = false
 
 	err = runInit(initCmd, []string{})
 	require.NoError(t, err)
@@ -141,7 +143,7 @@ func TestInitCommandWithCustomTemplate(t *testing.T) {
 	assertFileExists(t, filepath.Join(templateDir, "context.md"))
 }
 
-func TestInitCommandFailsIfExists(t *testing.T) {
+func TestInitCommandFailsIfTemplateExists(t *testing.T) {
 	tmpDir := t.TempDir()
 	originalDir, err := os.Getwd()
 	require.NoError(t, err)
@@ -150,17 +152,21 @@ func TestInitCommandFailsIfExists(t *testing.T) {
 	err = os.Chdir(tmpDir)
 	require.NoError(t, err)
 
-	// Create .wisp directory first
-	err = os.Mkdir(filepath.Join(tmpDir, ".wisp"), 0755)
+	// Create .wisp directory and template directory first
+	wispDir := filepath.Join(tmpDir, ".wisp")
+	templateDir := filepath.Join(wispDir, "templates", "default")
+	err = os.MkdirAll(templateDir, 0755)
 	require.NoError(t, err)
 
-	// Reset template flag
+	// Reset flags
 	initTemplate = "default"
+	initForce = false
 
-	// Init should fail
+	// Init should fail when template already exists
 	err = runInit(initCmd, []string{})
 	assert.Error(t, err)
 	assert.Contains(t, err.Error(), "already exists")
+	assert.Contains(t, err.Error(), "--force")
 }
 
 func assertDirExists(t *testing.T, path string) {
