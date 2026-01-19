@@ -28,6 +28,7 @@ var (
 	startTemplate     string
 	startCheckpoint   string
 	startHeadless     bool
+	startContinue     bool
 	startServer       bool
 	startServerPort   int
 	startSetPassword  bool
