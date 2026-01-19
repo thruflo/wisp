@@ -239,7 +239,7 @@ build commands, and testing instructions.
 
 ## State Files
 
-Wisp manages state through files in .wisp/:
+Wisp manages state through files in /var/local/wisp/session/:
 - tasks.json: The task list you're working through
 - state.json: Your current status (you write this)
 - history.json: Rolling iteration history
@@ -291,7 +291,7 @@ Read the RFC specification and generate a task list.
 2. Break down the implementation into discrete, testable tasks
 3. Order tasks by dependency (setup first, then features, then tests)
 4. Each task should be completable in one commit
-5. Output tasks.json to .wisp/tasks.json
+5. Output tasks.json to /var/local/wisp/session/tasks.json
 
 ## Task Guidelines
 
@@ -302,7 +302,7 @@ Read the RFC specification and generate a task list.
 
 ## Output Format
 
-Write a valid JSON array to .wisp/tasks.json with this structure:
+Write a valid JSON array to /var/local/wisp/session/tasks.json with this structure:
 
 ` + "```json" + `
 [
@@ -327,7 +327,7 @@ The RFC has been updated. Reconcile the task list with the changes.
 ## Instructions
 
 1. Read the RFC diff provided below
-2. Read the current tasks.json from .wisp/tasks.json
+2. Read the current tasks.json from /var/local/wisp/session/tasks.json
 3. Identify which tasks need to be:
    - Modified (requirements changed)
    - Added (new features)
@@ -345,7 +345,7 @@ The RFC has been updated. Reconcile the task list with the changes.
 
 ## Output
 
-Write updated tasks.json to .wisp/tasks.json.
+Write updated tasks.json to /var/local/wisp/session/tasks.json.
 `
 
 const reviewTasksMDContent = `# Address PR Feedback
@@ -355,7 +355,7 @@ Generate tasks to address PR review feedback.
 ## Instructions
 
 1. Read the feedback content provided below
-2. Read the current tasks.json from .wisp/tasks.json
+2. Read the current tasks.json from /var/local/wisp/session/tasks.json
 3. Generate new tasks to address each piece of feedback
 4. Append new tasks to the task list
 5. Output updated tasks.json
@@ -370,7 +370,7 @@ Generate tasks to address PR review feedback.
 
 ## Output
 
-Write updated tasks.json to .wisp/tasks.json.
+Write updated tasks.json to /var/local/wisp/session/tasks.json.
 `
 
 const iterateMDContent = `# Iteration Instructions
@@ -379,14 +379,14 @@ Complete the next incomplete task in the task list.
 
 ## Steps
 
-1. Read .wisp/tasks.json and find the first task where passes is false
-2. Read .wisp/state.json for context on previous iteration
-3. Check .wisp/response.json for human response (delete after reading)
+1. Read /var/local/wisp/session/tasks.json and find the first task where passes is false
+2. Read /var/local/wisp/session/state.json for context on previous iteration
+3. Check /var/local/wisp/session/response.json for human response (delete after reading)
 4. Implement the task following its steps
 5. Verify your work (tests, typecheck, build as appropriate)
 6. Commit your changes with a descriptive message
-7. Update .wisp/tasks.json to mark the task as passes: true
-8. Write .wisp/state.json with your status
+7. Update /var/local/wisp/session/tasks.json to mark the task as passes: true
+8. Write /var/local/wisp/session/state.json with your status
 
 ## State Updates
 
@@ -413,7 +413,7 @@ If you cannot proceed:
 ## RFC Divergence
 
 If your implementation differs from the RFC (e.g., better approach discovered),
-append a note to .wisp/divergence.md explaining the deviation.
+append a note to /var/local/wisp/session/divergence.md explaining the deviation.
 
 ## Completion
 
