@@ -44,7 +44,7 @@ func TestStore_CreateAndGetSession(t *testing.T) {
 	session := &config.Session{
 		Repo:       "electric-sql/electric",
 		Spec:       "docs/rfc.md",
-		Siblings:   []string{"TanStack/db"},
+		Siblings:   []config.SiblingRepo{{Repo: "TanStack/db"}},
 		Checkpoint: "checkpoint-v1",
 		Branch:     "wisp/feat-auth",
 		SpriteName: "wisp-abc123",

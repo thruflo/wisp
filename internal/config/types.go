@@ -32,16 +32,39 @@ type Settings struct {
 	MCPServers  map[string]MCPServer `json:"mcpServers,omitempty"`
 }
 
+// SiblingRepo represents a sibling repository with optional ref.
+type SiblingRepo struct {
+	Repo string `yaml:"repo"`
+	Ref  string `yaml:"ref,omitempty"`
+}
+
+// UnmarshalYAML implements yaml.Unmarshaler for backwards compatibility.
+// Supports both legacy string format ("org/repo") and new struct format.
+func (s *SiblingRepo) UnmarshalYAML(unmarshal func(interface{}) error) error {
+	// Try string first (legacy format)
+	var str string
+	if err := unmarshal(&str); err == nil {
+		s.Repo = str
+		s.Ref = ""
+		return nil
+	}
+	// Then try struct format
+	type siblingAlias SiblingRepo
+	return unmarshal((*siblingAlias)(s))
+}
+
 // Session represents a .wisp/sessions/<branch>/session.yaml file.
 type Session struct {
-	Repo       string    `yaml:"repo"`
-	Spec       string    `yaml:"spec"`
-	Siblings   []string  `yaml:"siblings,omitempty"`
-	Checkpoint string    `yaml:"checkpoint,omitempty"`
-	Branch     string    `yaml:"branch"`
-	SpriteName string    `yaml:"sprite_name"`
-	StartedAt  time.Time `yaml:"started_at"`
-	Status     string    `yaml:"status"`
+	Repo       string        `yaml:"repo"`
+	Ref        string        `yaml:"ref,omitempty"`      // Base ref to branch from
+	Spec       string        `yaml:"spec"`
+	Continue   bool          `yaml:"continue,omitempty"` // Continue on existing branch
+	Siblings   []SiblingRepo `yaml:"siblings,omitempty"` // Sibling repos with optional refs
+	Checkpoint string        `yaml:"checkpoint,omitempty"`
+	Branch     string        `yaml:"branch"`
+	SpriteName string        `yaml:"sprite_name"`
+	StartedAt  time.Time     `yaml:"started_at"`
+	Status     string        `yaml:"status"`
 }
 
 // Session status values.

@@ -260,7 +260,7 @@ func TestSession_YAMLMarshal(t *testing.T) {
 			session: Session{
 				Repo:       "electric-sql/electric",
 				Spec:       "docs/rfc.md",
-				Siblings:   []string{"TanStack/db"},
+				Siblings:   []SiblingRepo{{Repo: "TanStack/db"}},
 				Checkpoint: "checkpoint-123",
 				Branch:     "wisp/feat-auth",
 				SpriteName: "wisp-a1b2c3",
@@ -270,7 +270,7 @@ func TestSession_YAMLMarshal(t *testing.T) {
 			want: `repo: electric-sql/electric
 spec: docs/rfc.md
 siblings:
-    - TanStack/db
+    - repo: TanStack/db
 checkpoint: checkpoint-123
 branch: wisp/feat-auth
 sprite_name: wisp-a1b2c3
@@ -352,7 +352,7 @@ status: running
 			want: Session{
 				Repo:       "electric-sql/electric",
 				Spec:       "docs/rfc.md",
-				Siblings:   []string{"TanStack/db"},
+				Siblings:   []SiblingRepo{{Repo: "TanStack/db"}},
 				Checkpoint: "checkpoint-123",
 				Branch:     "wisp/feat-auth",
 				SpriteName: "wisp-a1b2c3",
@@ -396,7 +396,7 @@ status: running
 			want: Session{
 				Repo:       "owner/repo",
 				Spec:       "spec.md",
-				Siblings:   []string{"org1/repo1", "org2/repo2", "org3/repo3"},
+				Siblings:   []SiblingRepo{{Repo: "org1/repo1"}, {Repo: "org2/repo2"}, {Repo: "org3/repo3"}},
 				Branch:     "wisp/multi",
 				SpriteName: "wisp-multi",
 				StartedAt:  startTime,
@@ -483,7 +483,7 @@ func TestSession_YAMLRoundTrip(t *testing.T) {
 	session := Session{
 		Repo:       "electric-sql/electric",
 		Spec:       "docs/rfc.md",
-		Siblings:   []string{"TanStack/db", "other/repo"},
+		Siblings:   []SiblingRepo{{Repo: "TanStack/db"}, {Repo: "other/repo"}},
 		Checkpoint: "checkpoint-123",
 		Branch:     "wisp/feat-auth",
 		SpriteName: "wisp-a1b2c3",

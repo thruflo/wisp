@@ -291,16 +291,16 @@ func setupSpriteForResume(
 
 	// Clone sibling repos
 	for _, sibling := range session.Siblings {
-		siblingParts := strings.Split(sibling, "/")
+		siblingParts := strings.Split(sibling.Repo, "/")
 		if len(siblingParts) != 2 {
-			return "", fmt.Errorf("invalid sibling repo format %q, expected org/repo", sibling)
+			return "", fmt.Errorf("invalid sibling repo format %q, expected org/repo", sibling.Repo)
 		}
 		siblingOrg, siblingRepo := siblingParts[0], siblingParts[1]
 		siblingPath := filepath.Join(sprite.ReposDir, siblingOrg, siblingRepo)
 
-		fmt.Printf("Cloning sibling %s...\n", sibling)
-		if err := CloneRepo(ctx, client, session.SpriteName, sibling, siblingPath, githubToken); err != nil {
-			return "", fmt.Errorf("failed to clone sibling %s: %w", sibling, err)
+		fmt.Printf("Cloning sibling %s...\n", sibling.Repo)
+		if err := CloneRepo(ctx, client, session.SpriteName, sibling.Repo, siblingPath, githubToken); err != nil {
+			return "", fmt.Errorf("failed to clone sibling %s: %w", sibling.Repo, err)
 		}
 	}
 
