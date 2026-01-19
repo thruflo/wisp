@@ -182,3 +182,139 @@ func assertFileExists(t *testing.T, path string) {
 	require.NoError(t, err, "file should exist: %s", path)
 	assert.False(t, info.IsDir(), "should be a file: %s", path)
 }
+
+func TestInitTemplateOnlyCreation(t *testing.T) {
+	tmpDir := t.TempDir()
+	originalDir, err := os.Getwd()
+	require.NoError(t, err)
+	defer os.Chdir(originalDir)
+
+	err = os.Chdir(tmpDir)
+	require.NoError(t, err)
+
+	// First, do a full init with default template
+	initTemplate = "default"
+	initForce = false
+	err = runInit(initCmd, []string{})
+	require.NoError(t, err)
+
+	wispDir := filepath.Join(tmpDir, ".wisp")
+
+	// Record config.yaml modification time to verify it's not rewritten
+	configPath := filepath.Join(wispDir, "config.yaml")
+	configInfo, err := os.Stat(configPath)
+	require.NoError(t, err)
+	configModTime := configInfo.ModTime()
+
+	// Now init with a new template name (should create only the template)
+	initTemplate = "website"
+	initForce = false
+	err = runInit(initCmd, []string{})
+	require.NoError(t, err)
+
+	// Verify new template directory was created
+	newTemplateDir := filepath.Join(wispDir, "templates", "website")
+	assertDirExists(t, newTemplateDir)
+	assertFileExists(t, filepath.Join(newTemplateDir, "context.md"))
+
+	// Verify config.yaml was NOT rewritten (same modification time)
+	configInfoAfter, err := os.Stat(configPath)
+	require.NoError(t, err)
+	assert.Equal(t, configModTime, configInfoAfter.ModTime(), "config.yaml should not be modified during template-only creation")
+
+	// Verify original template still exists
+	assertDirExists(t, filepath.Join(wispDir, "templates", "default"))
+}
+
+func TestInitForceOverwritesTemplate(t *testing.T) {
+	tmpDir := t.TempDir()
+	originalDir, err := os.Getwd()
+	require.NoError(t, err)
+	defer os.Chdir(originalDir)
+
+	err = os.Chdir(tmpDir)
+	require.NoError(t, err)
+
+	// First, do a full init with default template
+	initTemplate = "default"
+	initForce = false
+	err = runInit(initCmd, []string{})
+	require.NoError(t, err)
+
+	wispDir := filepath.Join(tmpDir, ".wisp")
+	templateDir := filepath.Join(wispDir, "templates", "default")
+
+	// Modify an existing template file to verify it gets overwritten
+	contextPath := filepath.Join(templateDir, "context.md")
+	originalContent, err := os.ReadFile(contextPath)
+	require.NoError(t, err)
+	err = os.WriteFile(contextPath, []byte("modified content"), 0644)
+	require.NoError(t, err)
+
+	// Try to init with default template again without --force (should fail)
+	initTemplate = "default"
+	initForce = false
+	err = runInit(initCmd, []string{})
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "already exists")
+
+	// Verify content was NOT overwritten
+	content, err := os.ReadFile(contextPath)
+	require.NoError(t, err)
+	assert.Equal(t, "modified content", string(content))
+
+	// Now init with --force (should succeed and overwrite)
+	initTemplate = "default"
+	initForce = true
+	err = runInit(initCmd, []string{})
+	require.NoError(t, err)
+
+	// Verify content WAS overwritten with original template content
+	content, err = os.ReadFile(contextPath)
+	require.NoError(t, err)
+	assert.Equal(t, string(originalContent), string(content))
+}
+
+func TestInitTemplateOnlyHasCorrectContent(t *testing.T) {
+	tmpDir := t.TempDir()
+	originalDir, err := os.Getwd()
+	require.NoError(t, err)
+	defer os.Chdir(originalDir)
+
+	err = os.Chdir(tmpDir)
+	require.NoError(t, err)
+
+	// Create minimal .wisp structure without templates
+	wispDir := filepath.Join(tmpDir, ".wisp")
+	err = os.MkdirAll(wispDir, 0755)
+	require.NoError(t, err)
+
+	// Init with a template (template-only creation since .wisp exists)
+	initTemplate = "backend"
+	initForce = false
+	err = runInit(initCmd, []string{})
+	require.NoError(t, err)
+
+	// Verify all expected template files exist with proper content
+	templateDir := filepath.Join(wispDir, "templates", "backend")
+	expectedTemplates := []string{
+		"context.md",
+		"create-tasks.md",
+		"update-tasks.md",
+		"review-tasks.md",
+		"iterate.md",
+		"generate-pr.md",
+	}
+
+	for _, tmpl := range expectedTemplates {
+		path := filepath.Join(templateDir, tmpl)
+		assertFileExists(t, path)
+
+		content, err := os.ReadFile(path)
+		require.NoError(t, err)
+		assert.NotEmpty(t, content, "template %s should have content", tmpl)
+
+		// Verify content is meaningful (not just empty or placeholder)
+		assert.True(t, len(content) > 50, "template %s should have substantial content", tmpl)
+	}
+}
