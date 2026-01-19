@@ -568,3 +568,139 @@ func TestParseRepoRef(t *testing.T) {
 		})
 	}
 }
+
+func TestSiblingRepo_YAMLMarshal(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		sibling SiblingRepo
+		want    string
+	}{
+		{
+			name:    "with ref",
+			sibling: SiblingRepo{Repo: "org/repo", Ref: "v1.0.0"},
+			want:    "repo: org/repo\nref: v1.0.0\n",
+		},
+		{
+			name:    "without ref",
+			sibling: SiblingRepo{Repo: "org/repo"},
+			want:    "repo: org/repo\n",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			data, err := yaml.Marshal(tt.sibling)
+			require.NoError(t, err)
+			assert.Equal(t, tt.want, string(data))
+		})
+	}
+}
+
+func TestSiblingRepo_YAMLUnmarshal(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		input   string
+		want    SiblingRepo
+		wantErr bool
+	}{
+		{
+			name:    "legacy string format",
+			input:   "org/repo",
+			want:    SiblingRepo{Repo: "org/repo", Ref: ""},
+			wantErr: false,
+		},
+		{
+			name:    "struct format with ref",
+			input:   "repo: org/repo\nref: v1.0.0",
+			want:    SiblingRepo{Repo: "org/repo", Ref: "v1.0.0"},
+			wantErr: false,
+		},
+		{
+			name:    "struct format without ref",
+			input:   "repo: org/repo",
+			want:    SiblingRepo{Repo: "org/repo", Ref: ""},
+			wantErr: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			var got SiblingRepo
+			err := yaml.Unmarshal([]byte(tt.input), &got)
+			if tt.wantErr {
+				assert.Error(t, err)
+				return
+			}
+			require.NoError(t, err)
+			assert.Equal(t, tt.want, got)
+		})
+	}
+}
+
+func TestSiblingRepo_YAMLRoundTrip(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		sibling SiblingRepo
+	}{
+		{
+			name:    "with ref",
+			sibling: SiblingRepo{Repo: "org/repo", Ref: "v1.0.0"},
+		},
+		{
+			name:    "without ref",
+			sibling: SiblingRepo{Repo: "org/repo"},
+		},
+		{
+			name:    "with branch ref",
+			sibling: SiblingRepo{Repo: "myorg/myrepo", Ref: "feature/branch"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			data, err := yaml.Marshal(tt.sibling)
+			require.NoError(t, err)
+
+			var got SiblingRepo
+			err = yaml.Unmarshal(data, &got)
+			require.NoError(t, err)
+			assert.Equal(t, tt.sibling, got)
+		})
+	}
+}
+
+func TestSession_WithSiblingRefs_YAMLRoundTrip(t *testing.T) {
+	t.Parallel()
+
+	session := Session{
+		Repo:     "electric-sql/electric",
+		Ref:      "v2.0.0",
+		Spec:     "docs/rfc.md",
+		Continue: true,
+		Siblings: []SiblingRepo{
+			{Repo: "TanStack/db", Ref: "main"},
+			{Repo: "other/repo"},
+		},
+		Branch:     "wisp/feat-auth",
+		SpriteName: "wisp-a1b2c3",
+		StartedAt:  time.Date(2026, 1, 16, 10, 0, 0, 0, time.UTC),
+		Status:     SessionStatusRunning,
+	}
+
+	data, err := yaml.Marshal(session)
+	require.NoError(t, err)
+
+	var got Session
+	err = yaml.Unmarshal(data, &got)
+	require.NoError(t, err)
+	assert.Equal(t, session, got)
+}
