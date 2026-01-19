@@ -1,6 +1,9 @@
 package config
 
-import "time"
+import (
+	"strings"
+	"time"
+)
 
 // Limits defines operational boundaries for a wisp session.
 type Limits struct {
@@ -73,3 +76,12 @@ const (
 	SessionStatusStopped   = "stopped"
 	SessionStatusCompleted = "completed"
 )
+
+// ParseRepoRef parses "org/repo" or "org/repo@ref" format.
+// Returns (repo, ref) where ref is empty string if not specified.
+func ParseRepoRef(s string) (repo, ref string) {
+	if idx := strings.LastIndex(s, "@"); idx != -1 {
+		return s[:idx], s[idx+1:]
+	}
+	return s, ""
+}

@@ -499,3 +499,72 @@ func TestSession_YAMLRoundTrip(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, session, got)
 }
+
+func TestParseRepoRef(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		input    string
+		wantRepo string
+		wantRef  string
+	}{
+		{
+			name:     "no ref",
+			input:    "org/repo",
+			wantRepo: "org/repo",
+			wantRef:  "",
+		},
+		{
+			name:     "with branch ref",
+			input:    "org/repo@main",
+			wantRepo: "org/repo",
+			wantRef:  "main",
+		},
+		{
+			name:     "with tag ref",
+			input:    "org/repo@v1.2.0",
+			wantRepo: "org/repo",
+			wantRef:  "v1.2.0",
+		},
+		{
+			name:     "with commit ref",
+			input:    "org/repo@abc123def",
+			wantRepo: "org/repo",
+			wantRef:  "abc123def",
+		},
+		{
+			name:     "with slash in ref",
+			input:    "org/repo@feature/branch",
+			wantRepo: "org/repo",
+			wantRef:  "feature/branch",
+		},
+		{
+			name:     "multiple @ signs (uses last one)",
+			input:    "org/repo@feature@v2",
+			wantRepo: "org/repo@feature",
+			wantRef:  "v2",
+		},
+		{
+			name:     "empty string",
+			input:    "",
+			wantRepo: "",
+			wantRef:  "",
+		},
+		{
+			name:     "just org/repo with no slash in repo",
+			input:    "repo",
+			wantRepo: "repo",
+			wantRef:  "",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			repo, ref := ParseRepoRef(tt.input)
+			assert.Equal(t, tt.wantRepo, repo)
+			assert.Equal(t, tt.wantRef, ref)
+		})
+	}
+}
