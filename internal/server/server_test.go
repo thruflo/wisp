@@ -873,12 +873,12 @@ func TestPendingInputConcurrency(t *testing.T) {
 			reqID := fmt.Sprintf("req-%d", id)
 
 			// Store
-			server.mu.Lock()
+			server.inputMu.Lock()
 			if server.pendingInputs == nil {
 				server.pendingInputs = make(map[string]string)
 			}
 			server.pendingInputs[reqID] = fmt.Sprintf("response-%d", id)
-			server.mu.Unlock()
+			server.inputMu.Unlock()
 
 			// Retrieve
 			resp, ok := server.GetPendingInput(reqID)
