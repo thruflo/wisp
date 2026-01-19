@@ -273,7 +273,7 @@ func setupSpriteForResume(
 
 	// Clone primary repo (token embedded in URL for auth)
 	fmt.Printf("Cloning %s...\n", session.Repo)
-	if err := CloneRepo(ctx, client, session.SpriteName, session.Repo, repoPath, githubToken); err != nil {
+	if err := CloneRepo(ctx, client, session.SpriteName, session.Repo, repoPath, githubToken, ""); err != nil {
 		return "", fmt.Errorf("failed to clone repo: %w", err)
 	}
 
@@ -289,7 +289,7 @@ func setupSpriteForResume(
 		return "", fmt.Errorf("failed to copy spec file: %w", err)
 	}
 
-	// Clone sibling repos
+	// Clone sibling repos (with optional ref checkout)
 	for _, sibling := range session.Siblings {
 		siblingParts := strings.Split(sibling.Repo, "/")
 		if len(siblingParts) != 2 {
@@ -298,8 +298,12 @@ func setupSpriteForResume(
 		siblingOrg, siblingRepo := siblingParts[0], siblingParts[1]
 		siblingPath := filepath.Join(sprite.ReposDir, siblingOrg, siblingRepo)
 
-		fmt.Printf("Cloning sibling %s...\n", sibling.Repo)
-		if err := CloneRepo(ctx, client, session.SpriteName, sibling.Repo, siblingPath, githubToken); err != nil {
+		if sibling.Ref != "" {
+			fmt.Printf("Cloning sibling %s@%s...\n", sibling.Repo, sibling.Ref)
+		} else {
+			fmt.Printf("Cloning sibling %s...\n", sibling.Repo)
+		}
+		if err := CloneRepo(ctx, client, session.SpriteName, sibling.Repo, siblingPath, githubToken, sibling.Ref); err != nil {
 			return "", fmt.Errorf("failed to clone sibling %s: %w", sibling.Repo, err)
 		}
 	}

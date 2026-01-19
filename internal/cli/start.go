@@ -431,14 +431,33 @@ func SetupSprite(
 
 	// Clone primary repo (token embedded in URL for auth)
 	fmt.Printf("Cloning %s...\n", session.Repo)
-	if err := CloneRepo(ctx, client, session.SpriteName, session.Repo, repoPath, githubToken); err != nil {
+	if err := CloneRepo(ctx, client, session.SpriteName, session.Repo, repoPath, githubToken, ""); err != nil {
 		return "", fmt.Errorf("failed to clone repo: %w", err)
 	}
 
-	// Create and checkout branch
-	fmt.Printf("Creating branch %s...\n", session.Branch)
-	if err := CreateBranch(ctx, client, session.SpriteName, repoPath, session.Branch); err != nil {
-		return "", fmt.Errorf("failed to create branch: %w", err)
+	// Handle branch checkout based on session mode
+	if session.Continue {
+		// Continue mode: fetch and checkout existing branch
+		fmt.Printf("Fetching and checking out existing branch %s...\n", session.Branch)
+		if err := fetchAndCheckoutBranch(ctx, client, session.SpriteName, repoPath, session.Branch); err != nil {
+			return "", fmt.Errorf("failed to checkout existing branch: %w", err)
+		}
+	} else if session.Ref != "" {
+		// Ref mode: checkout base ref, then create new branch from it
+		fmt.Printf("Checking out base ref %s...\n", session.Ref)
+		if err := checkoutRef(ctx, client, session.SpriteName, repoPath, session.Ref); err != nil {
+			return "", fmt.Errorf("failed to checkout ref: %w", err)
+		}
+		fmt.Printf("Creating branch %s...\n", session.Branch)
+		if err := CreateBranch(ctx, client, session.SpriteName, repoPath, session.Branch); err != nil {
+			return "", fmt.Errorf("failed to create branch: %w", err)
+		}
+	} else {
+		// Default mode: create new branch from default branch
+		fmt.Printf("Creating branch %s...\n", session.Branch)
+		if err := CreateBranch(ctx, client, session.SpriteName, repoPath, session.Branch); err != nil {
+			return "", fmt.Errorf("failed to create branch: %w", err)
+		}
 	}
 
 	// Copy spec file from local to Sprite
@@ -447,7 +466,7 @@ func SetupSprite(
 		return "", fmt.Errorf("failed to copy spec file: %w", err)
 	}
 
-	// Clone sibling repos
+	// Clone sibling repos (with optional ref checkout)
 	for _, sibling := range session.Siblings {
 		siblingParts := strings.Split(sibling.Repo, "/")
 		if len(siblingParts) != 2 {
@@ -456,8 +475,12 @@ func SetupSprite(
 		siblingOrg, siblingRepo := siblingParts[0], siblingParts[1]
 		siblingPath := filepath.Join(sprite.ReposDir, siblingOrg, siblingRepo)
 
-		fmt.Printf("Cloning sibling %s...\n", sibling.Repo)
-		if err := CloneRepo(ctx, client, session.SpriteName, sibling.Repo, siblingPath, githubToken); err != nil {
+		if sibling.Ref != "" {
+			fmt.Printf("Cloning sibling %s@%s...\n", sibling.Repo, sibling.Ref)
+		} else {
+			fmt.Printf("Cloning sibling %s...\n", sibling.Repo)
+		}
+		if err := CloneRepo(ctx, client, session.SpriteName, sibling.Repo, siblingPath, githubToken, sibling.Ref); err != nil {
 			return "", fmt.Errorf("failed to clone sibling %s: %w", sibling.Repo, err)
 		}
 	}
@@ -492,8 +515,9 @@ func SetupSprite(
 
 // CloneRepo clones a GitHub repository to the specified path on a Sprite.
 // If githubToken is provided, it's embedded in the clone URL for authentication.
+// If ref is provided, the specified ref (branch, tag, or commit) is checked out after cloning.
 // Exported for testing.
-func CloneRepo(ctx context.Context, client sprite.Client, spriteName, repo, destPath, githubToken string) error {
+func CloneRepo(ctx context.Context, client sprite.Client, spriteName, repo, destPath, githubToken, ref string) error {
 	// Remove destination if it exists (handles stale state from previous runs)
 	_, _, _, _ = client.ExecuteOutput(ctx, spriteName, "", nil, "rm", "-rf", destPath)
 
@@ -522,6 +546,21 @@ func CloneRepo(ctx context.Context, client sprite.Client, spriteName, repo, dest
 		return fmt.Errorf("git clone failed with exit code %d: %s", exitCode, string(stderr))
 	}
 
+	// If ref is specified, fetch and checkout the ref
+	if ref != "" {
+		// Fetch the ref (might be a remote branch, tag, or commit)
+		_, _, _, _ = client.ExecuteOutput(ctx, spriteName, destPath, nil, "git", "fetch", "origin", ref)
+
+		// Checkout the ref
+		_, stderr, exitCode, err := client.ExecuteOutput(ctx, spriteName, destPath, nil, "git", "checkout", ref)
+		if err != nil {
+			return fmt.Errorf("failed to checkout ref %s: %w", ref, err)
+		}
+		if exitCode != 0 {
+			return fmt.Errorf("git checkout %s failed with exit code %d: %s", ref, exitCode, string(stderr))
+		}
+	}
+
 	return nil
 }
 
@@ -534,6 +573,48 @@ func CreateBranch(ctx context.Context, client sprite.Client, spriteName, repoPat
 	}
 	if exitCode != 0 {
 		return fmt.Errorf("git checkout failed with exit code %d: %s", exitCode, string(stderr))
+	}
+
+	return nil
+}
+
+// fetchAndCheckoutBranch fetches and checks out an existing remote branch.
+// Used when continuing work on an existing branch (--continue mode).
+func fetchAndCheckoutBranch(ctx context.Context, client sprite.Client, spriteName, repoPath, branch string) error {
+	// Fetch the branch from remote
+	_, stderr, exitCode, err := client.ExecuteOutput(ctx, spriteName, repoPath, nil, "git", "fetch", "origin", branch)
+	if err != nil {
+		return fmt.Errorf("failed to fetch branch %s: %w", branch, err)
+	}
+	if exitCode != 0 {
+		return fmt.Errorf("git fetch %s failed with exit code %d: %s", branch, exitCode, string(stderr))
+	}
+
+	// Checkout the branch (tracking remote)
+	_, stderr, exitCode, err = client.ExecuteOutput(ctx, spriteName, repoPath, nil, "git", "checkout", "-B", branch, "origin/"+branch)
+	if err != nil {
+		return fmt.Errorf("failed to checkout branch %s: %w", branch, err)
+	}
+	if exitCode != 0 {
+		return fmt.Errorf("git checkout %s failed with exit code %d: %s", branch, exitCode, string(stderr))
+	}
+
+	return nil
+}
+
+// checkoutRef checks out a specific ref (branch, tag, or commit) in a repository.
+// Used when creating a new branch from a specific base ref.
+func checkoutRef(ctx context.Context, client sprite.Client, spriteName, repoPath, ref string) error {
+	// Fetch the ref first (might be a remote branch, tag, or commit)
+	_, _, _, _ = client.ExecuteOutput(ctx, spriteName, repoPath, nil, "git", "fetch", "origin", ref)
+
+	// Checkout the ref
+	_, stderr, exitCode, err := client.ExecuteOutput(ctx, spriteName, repoPath, nil, "git", "checkout", ref)
+	if err != nil {
+		return fmt.Errorf("failed to checkout ref %s: %w", ref, err)
+	}
+	if exitCode != 0 {
+		return fmt.Errorf("git checkout %s failed with exit code %d: %s", ref, exitCode, string(stderr))
 	}
 
 	return nil
