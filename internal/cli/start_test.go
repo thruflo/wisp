@@ -200,3 +200,24 @@ func TestHeadlessResultWithError(t *testing.T) {
 	assert.Equal(t, "crash", parsed["reason"])
 	assert.Equal(t, "connection failed: timeout", parsed["error"])
 }
+
+func TestContinueFlagRegistered(t *testing.T) {
+	// Verify the --continue flag is registered on the start command
+	flag := startCmd.Flags().Lookup("continue")
+	require.NotNil(t, flag, "--continue flag should be registered")
+	assert.Equal(t, "bool", flag.Value.Type())
+	assert.Equal(t, "false", flag.DefValue)
+	assert.Contains(t, flag.Usage, "existing branch")
+}
+
+func TestStartFlagsAllRegistered(t *testing.T) {
+	// Verify all expected flags are registered
+	expectedFlags := []string{
+		"repo", "spec", "sibling-repos", "branch", "template", "checkpoint", "headless", "continue",
+	}
+
+	for _, name := range expectedFlags {
+		flag := startCmd.Flags().Lookup(name)
+		assert.NotNil(t, flag, "flag --%s should be registered", name)
+	}
+}

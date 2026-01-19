@@ -11,6 +11,7 @@ import (
 )
 
 var initTemplate string
+var initForce bool
 
 var initCmd = &cobra.Command{
 	Use:   "init",
@@ -26,6 +27,7 @@ This command sets up:
 
 func init() {
 	initCmd.Flags().StringVarP(&initTemplate, "template", "t", "default", "template name to create")
+	initCmd.Flags().BoolVarP(&initForce, "force", "f", false, "overwrite existing template")
 	rootCmd.AddCommand(initCmd)
 }
 
@@ -36,52 +38,87 @@ func runInit(cmd *cobra.Command, args []string) error {
 	}
 
 	wispDir := filepath.Join(cwd, ".wisp")
+	templateDir := filepath.Join(wispDir, "templates", initTemplate)
 
-	// Check if .wisp already exists
-	if _, err := os.Stat(wispDir); err == nil {
-		return fmt.Errorf(".wisp directory already exists")
+	wispExists := dirExists(wispDir)
+	templateExists := dirExists(templateDir)
+
+	// Handle three cases:
+	// 1. .wisp/ doesn't exist -> full initialization
+	// 2. .wisp/ exists, template doesn't exist -> create only template
+	// 3. .wisp/ exists, template exists -> error unless --force
+
+	if wispExists && templateExists && !initForce {
+		return fmt.Errorf("template %q already exists (use --force to overwrite)", initTemplate)
 	}
 
-	// Create directory structure
-	dirs := []string{
-		wispDir,
-		filepath.Join(wispDir, "sessions"),
-		filepath.Join(wispDir, "templates", initTemplate),
-	}
+	if !wispExists {
+		// Full initialization
+		dirs := []string{
+			wispDir,
+			filepath.Join(wispDir, "sessions"),
+			templateDir,
+		}
 
-	for _, dir := range dirs {
-		if err := os.MkdirAll(dir, 0755); err != nil {
-			return fmt.Errorf("failed to create directory %s: %w", dir, err)
+		for _, dir := range dirs {
+			if err := os.MkdirAll(dir, 0755); err != nil {
+				return fmt.Errorf("failed to create directory %s: %w", dir, err)
+			}
+		}
+
+		// Write config.yaml
+		if err := writeConfigYAML(wispDir); err != nil {
+			return err
+		}
+
+		// Write settings.json
+		if err := writeSettingsJSON(wispDir); err != nil {
+			return err
+		}
+
+		// Write .sprite.env placeholder
+		if err := writeSpriteEnv(wispDir); err != nil {
+			return err
+		}
+
+		// Write .gitignore
+		if err := writeGitignore(wispDir); err != nil {
+			return err
+		}
+
+		// Write template files
+		if err := writeTemplateFiles(wispDir, initTemplate); err != nil {
+			return err
+		}
+
+		fmt.Printf("Initialized .wisp/ directory with %q template\n", initTemplate)
+	} else {
+		// Template-only creation (wisp already initialized)
+		if err := os.MkdirAll(templateDir, 0755); err != nil {
+			return fmt.Errorf("failed to create template directory %s: %w", templateDir, err)
+		}
+
+		if err := writeTemplateFiles(wispDir, initTemplate); err != nil {
+			return err
+		}
+
+		if templateExists && initForce {
+			fmt.Printf("Overwrote template %q\n", initTemplate)
+		} else {
+			fmt.Printf("Created template %q\n", initTemplate)
 		}
 	}
 
-	// Write config.yaml
-	if err := writeConfigYAML(wispDir); err != nil {
-		return err
-	}
-
-	// Write settings.json
-	if err := writeSettingsJSON(wispDir); err != nil {
-		return err
-	}
-
-	// Write .sprite.env placeholder
-	if err := writeSpriteEnv(wispDir); err != nil {
-		return err
-	}
-
-	// Write .gitignore
-	if err := writeGitignore(wispDir); err != nil {
-		return err
-	}
-
-	// Write template files
-	if err := writeTemplateFiles(wispDir, initTemplate); err != nil {
-		return err
-	}
-
-	fmt.Printf("Initialized .wisp/ directory with %q template\n", initTemplate)
 	return nil
+}
+
+// dirExists checks if a directory exists
+func dirExists(path string) bool {
+	info, err := os.Stat(path)
+	if err != nil {
+		return false
+	}
+	return info.IsDir()
 }
 
 func writeConfigYAML(wispDir string) error {

@@ -233,7 +233,9 @@ status: running
 
 	assert.Equal(t, "electric-sql/electric", session.Repo)
 	assert.Equal(t, "docs/rfc.md", session.Spec)
-	assert.Equal(t, []string{"TanStack/db"}, session.Siblings)
+	assert.Len(t, session.Siblings, 1)
+	assert.Equal(t, "TanStack/db", session.Siblings[0].Repo)
+	assert.Equal(t, "", session.Siblings[0].Ref)
 	assert.Equal(t, "checkpoint-123", session.Checkpoint)
 	assert.Equal(t, "wisp/feat-auth", session.Branch)
 	assert.Equal(t, "wisp-a1b2c3", session.SpriteName)

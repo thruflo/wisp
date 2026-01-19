@@ -40,7 +40,7 @@ func TestResumeCommand_SessionExists(t *testing.T) {
 	session := &config.Session{
 		Repo:       "test-org/test-repo",
 		Spec:       "docs/rfc.md",
-		Siblings:   []string{"test-org/sibling-repo"},
+		Siblings:   []config.SiblingRepo{{Repo: "test-org/sibling-repo"}},
 		Checkpoint: "checkpoint-123",
 		Branch:     "wisp/test-feature",
 		SpriteName: "wisp-abc123",
@@ -60,7 +60,7 @@ func TestResumeCommand_SessionExists(t *testing.T) {
 	assert.Equal(t, session.SpriteName, loaded.SpriteName)
 	assert.Equal(t, session.Checkpoint, loaded.Checkpoint)
 	assert.Len(t, loaded.Siblings, 1)
-	assert.Equal(t, "test-org/sibling-repo", loaded.Siblings[0])
+	assert.Equal(t, "test-org/sibling-repo", loaded.Siblings[0].Repo)
 }
 
 func TestResumeCommand_SessionStatusUpdate(t *testing.T) {
