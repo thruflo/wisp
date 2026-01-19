@@ -13,9 +13,16 @@ type Limits struct {
 	NoProgressThreshold int     `yaml:"no_progress_threshold"`
 }
 
+// ServerConfig defines optional web server configuration.
+type ServerConfig struct {
+	Port         int    `yaml:"port"`
+	PasswordHash string `yaml:"password_hash"`
+}
+
 // Config represents the .wisp/config.yaml file.
 type Config struct {
-	Limits Limits `yaml:"limits"`
+	Limits Limits        `yaml:"limits"`
+	Server *ServerConfig `yaml:"server,omitempty"`
 }
 
 // Permissions defines Claude Code permission rules.

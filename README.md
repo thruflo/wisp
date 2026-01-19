@@ -60,6 +60,36 @@ wisp start --repo org/repo --spec docs/my-rfc.md --sibling-repos org/shared-lib
 
 When the agent needs input, the TUI prompts for a response. Type and press Enter.
 
+### Remote access
+
+Monitor and interact with sessions from any device using the built-in web server:
+
+```bash
+wisp start --repo org/repo --spec docs/rfc.md --server
+```
+
+On first use, you'll be prompted to set a password. The server URL is printed
+(default: `http://localhost:8374`). Expose via ngrok for mobile access:
+
+```bash
+ngrok http 8374
+```
+
+The web interface provides:
+- Dashboard with active sessions
+- Task list with completion status
+- Live Claude output stream
+- Input prompt for NEEDS_INPUT responses
+- Browser notifications when input is needed
+
+Additional server options:
+
+```bash
+wisp start ... --server --port 9000    # custom port
+wisp start ... --server --password     # change password
+wisp resume wisp/my-feature --server   # resume with server
+```
+
 ### Complete and create PR
 
 ```bash

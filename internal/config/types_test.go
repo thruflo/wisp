@@ -448,6 +448,122 @@ func TestConfig_YAMLRoundTrip(t *testing.T) {
 	assert.Equal(t, config, got)
 }
 
+func TestConfig_WithServer_YAMLRoundTrip(t *testing.T) {
+	t.Parallel()
+
+	config := Config{
+		Limits: Limits{
+			MaxIterations:       50,
+			MaxBudgetUSD:        20.00,
+			MaxDurationHours:    4,
+			NoProgressThreshold: 3,
+		},
+		Server: &ServerConfig{
+			Port:         9000,
+			PasswordHash: "$argon2id$v=19$m=65536,t=3,p=4$salt$hash",
+		},
+	}
+
+	data, err := yaml.Marshal(config)
+	require.NoError(t, err)
+
+	var got Config
+	err = yaml.Unmarshal(data, &got)
+	require.NoError(t, err)
+	assert.Equal(t, config, got)
+}
+
+func TestServerConfig_YAMLMarshal(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name   string
+		config ServerConfig
+		want   string
+	}{
+		{
+			name: "full config",
+			config: ServerConfig{
+				Port:         8374,
+				PasswordHash: "$argon2id$v=19$m=65536,t=3,p=4$salt$hash",
+			},
+			want: `port: 8374
+password_hash: $argon2id$v=19$m=65536,t=3,p=4$salt$hash
+`,
+		},
+		{
+			name: "port only",
+			config: ServerConfig{
+				Port: 9000,
+			},
+			want: `port: 9000
+password_hash: ""
+`,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got, err := yaml.Marshal(tt.config)
+			require.NoError(t, err)
+			assert.Equal(t, tt.want, string(got))
+		})
+	}
+}
+
+func TestServerConfig_YAMLUnmarshal(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		input   string
+		want    ServerConfig
+		wantErr bool
+	}{
+		{
+			name: "full config",
+			input: `port: 8374
+password_hash: "$argon2id$v=19$m=65536,t=3,p=4$salt$hash"
+`,
+			want: ServerConfig{
+				Port:         8374,
+				PasswordHash: "$argon2id$v=19$m=65536,t=3,p=4$salt$hash",
+			},
+			wantErr: false,
+		},
+		{
+			name: "port only",
+			input: `port: 9000
+`,
+			want: ServerConfig{
+				Port: 9000,
+			},
+			wantErr: false,
+		},
+		{
+			name:    "invalid yaml",
+			input:   `port: [`,
+			want:    ServerConfig{},
+			wantErr: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			var got ServerConfig
+			err := yaml.Unmarshal([]byte(tt.input), &got)
+			if tt.wantErr {
+				assert.Error(t, err)
+				return
+			}
+			require.NoError(t, err)
+			assert.Equal(t, tt.want, got)
+		})
+	}
+}
+
 func TestSettings_JSONRoundTrip(t *testing.T) {
 	t.Parallel()
 

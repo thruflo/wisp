@@ -11,22 +11,27 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
+	"github.com/thruflo/wisp/internal/auth"
 	"github.com/thruflo/wisp/internal/config"
 	"github.com/thruflo/wisp/internal/loop"
+	"github.com/thruflo/wisp/internal/server"
 	"github.com/thruflo/wisp/internal/sprite"
 	"github.com/thruflo/wisp/internal/state"
 	"github.com/thruflo/wisp/internal/tui"
 )
 
 var (
-	startRepo        string
-	startSpec        string
-	startSiblingRepo []string
-	startBranch      string
-	startTemplate    string
-	startCheckpoint  string
-	startHeadless    bool
-	startContinue    bool
+	startRepo         string
+	startSpec         string
+	startSiblingRepo  []string
+	startBranch       string
+	startTemplate     string
+	startCheckpoint   string
+	startHeadless     bool
+	startContinue     bool
+	startServer       bool
+	startServerPort   int
+	startSetPassword  bool
 )
 
 // HeadlessResult is the JSON output format for headless mode.
@@ -50,10 +55,18 @@ and begins the iteration loop.
 The --repo and --spec flags are required. The spec path should be relative
 to the repository root and point to the RFC/specification document.
 
+Remote Access:
+  Use --server to start a web server alongside the TUI for monitoring and
+  interacting with the session from any device (phone, tablet, another computer).
+  On first use, you'll be prompted to set a password. Use --port to customize
+  the server port (default: 8374). Use --password to change the password.
+
 Example:
   wisp start --repo org/repo --spec docs/rfc.md
   wisp start --repo org/repo --spec docs/rfc.md --branch feature/my-feature
-  wisp start --repo org/repo --spec docs/rfc.md --sibling-repos org/other-repo`,
+  wisp start --repo org/repo --spec docs/rfc.md --sibling-repos org/other-repo
+  wisp start --repo org/repo --spec docs/rfc.md --server
+  wisp start --repo org/repo --spec docs/rfc.md --server --port 9000`,
 	RunE: runStart,
 }
 
@@ -66,6 +79,9 @@ func init() {
 	startCmd.Flags().StringVarP(&startCheckpoint, "checkpoint", "c", "", "checkpoint ID to restore from")
 	startCmd.Flags().BoolVar(&startHeadless, "headless", false, "run without TUI, print JSON result to stdout (for testing/CI)")
 	startCmd.Flags().BoolVar(&startContinue, "continue", false, "continue on existing branch instead of creating new")
+	startCmd.Flags().BoolVar(&startServer, "server", false, "start web server alongside TUI for remote access")
+	startCmd.Flags().IntVar(&startServerPort, "port", config.DefaultServerPort, "web server port (requires --server)")
+	startCmd.Flags().BoolVar(&startSetPassword, "password", false, "prompt to set/change web server password")
 
 	startCmd.MarkFlagRequired("repo")
 	startCmd.MarkFlagRequired("spec")
@@ -99,6 +115,13 @@ func runStart(cmd *cobra.Command, args []string) error {
 	cfg, err := config.LoadConfig(cwd)
 	if err != nil {
 		return fmt.Errorf("failed to load config: %w", err)
+	}
+
+	// Handle server mode and password setup
+	if startServer || startSetPassword {
+		if err := handleServerPassword(cwd, cfg, startServer, startSetPassword, startServerPort); err != nil {
+			return err
+		}
 	}
 
 	// Load settings
@@ -210,8 +233,51 @@ func runStart(cmd *cobra.Command, args []string) error {
 	// Create TUI
 	t := tui.NewTUI(os.Stdout)
 
+	// Create web server if enabled
+	var srv *server.Server
+	if startServer {
+		var err error
+		srv, err = server.NewServerFromConfig(cfg.Server)
+		if err != nil {
+			return fmt.Errorf("failed to create web server: %w", err)
+		}
+
+		// Start server in background
+		serverErrCh := make(chan error, 1)
+		go func() {
+			serverErrCh <- srv.Start(ctx)
+		}()
+
+		// Give the server a moment to start and check for errors
+		select {
+		case err := <-serverErrCh:
+			return fmt.Errorf("web server failed to start: %w", err)
+		case <-time.After(100 * time.Millisecond):
+			// Server started successfully
+		}
+
+		fmt.Printf("Web server running at http://localhost:%d\n", cfg.Server.Port)
+
+		// Ensure server is stopped when we exit
+		defer func() {
+			if err := srv.Stop(); err != nil {
+				fmt.Printf("Warning: failed to stop web server: %v\n", err)
+			}
+		}()
+	}
+
 	// Create and run loop
-	l := loop.NewLoop(client, syncMgr, store, cfg, session, t, repoPath, templateDir)
+	l := loop.NewLoopWithOptions(loop.LoopOptions{
+		Client:      client,
+		SyncManager: syncMgr,
+		Store:       store,
+		Config:      cfg,
+		Session:     session,
+		TUI:         t,
+		Server:      srv,
+		RepoPath:    repoPath,
+		TemplateDir: templateDir,
+	})
 
 	fmt.Printf("Starting iteration loop...\n")
 
@@ -675,4 +741,50 @@ func RunCreateTasksPrompt(ctx context.Context, client sprite.Client, session *co
 
 	return sprite.RunTasksPrompt(ctx, client, session.SpriteName, repoPath,
 		createTasksPath, "RFC path: "+RemoteSpecPath, contextPath, 50)
+}
+
+// handleServerPassword handles password setup for the web server.
+// It prompts for a password if needed and saves the hash to config.
+func handleServerPassword(basePath string, cfg *config.Config, serverEnabled, setPassword bool, port int) error {
+	// Initialize server config if not present
+	if cfg.Server == nil {
+		cfg.Server = config.DefaultServerConfig()
+	}
+
+	// Update port from flag
+	cfg.Server.Port = port
+
+	// Check if we need to prompt for password
+	needsPassword := false
+
+	if setPassword {
+		// User explicitly wants to set/change password
+		needsPassword = true
+	} else if serverEnabled && cfg.Server.PasswordHash == "" {
+		// Server mode enabled but no password configured
+		needsPassword = true
+	}
+
+	if needsPassword {
+		password, err := auth.PromptAndConfirmPassword()
+		if err != nil {
+			return fmt.Errorf("password setup failed: %w", err)
+		}
+
+		hash, err := auth.HashPassword(password)
+		if err != nil {
+			return fmt.Errorf("failed to hash password: %w", err)
+		}
+
+		cfg.Server.PasswordHash = hash
+
+		// Save the updated config
+		if err := config.SaveConfig(basePath, cfg); err != nil {
+			return fmt.Errorf("failed to save config: %w", err)
+		}
+
+		fmt.Println("Password saved to config.")
+	}
+
+	return nil
 }

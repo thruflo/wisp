@@ -18,6 +18,7 @@ const (
 	DefaultMaxBudgetUSD        = 20.0
 	DefaultMaxDurationHours    = 4.0
 	DefaultNoProgressThreshold = 3
+	DefaultServerPort          = 8374
 )
 
 // DefaultLimits returns limits with sensible default values.
@@ -27,6 +28,13 @@ func DefaultLimits() Limits {
 		MaxBudgetUSD:        DefaultMaxBudgetUSD,
 		MaxDurationHours:    DefaultMaxDurationHours,
 		NoProgressThreshold: DefaultNoProgressThreshold,
+	}
+}
+
+// DefaultServerConfig returns a ServerConfig with sensible default values.
+func DefaultServerConfig() *ServerConfig {
+	return &ServerConfig{
+		Port: DefaultServerPort,
 	}
 }
 
@@ -87,6 +95,22 @@ func ValidateConfig(cfg *Config) error {
 	}
 	if cfg.Limits.NoProgressThreshold <= 0 {
 		return ValidationError{Field: "limits.no_progress_threshold", Message: "must be positive"}
+	}
+
+	// Validate server config if present
+	if cfg.Server != nil {
+		if err := ValidateServerConfig(cfg.Server); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+// ValidateServerConfig checks that server config values are valid.
+func ValidateServerConfig(cfg *ServerConfig) error {
+	if cfg.Port < 0 || cfg.Port > 65535 {
+		return ValidationError{Field: "server.port", Message: "must be between 0 and 65535"}
 	}
 	return nil
 }
@@ -218,4 +242,25 @@ func LoadEnvFile(basePath string) (map[string]string, error) {
 func IsValidationError(err error) bool {
 	var ve ValidationError
 	return errors.As(err, &ve)
+}
+
+// SaveConfig writes the config to .wisp/config.yaml at the given base path.
+// Creates the .wisp directory if it doesn't exist.
+func SaveConfig(basePath string, cfg *Config) error {
+	wispDir := filepath.Join(basePath, ".wisp")
+	if err := os.MkdirAll(wispDir, 0o755); err != nil {
+		return fmt.Errorf("failed to create .wisp directory: %w", err)
+	}
+
+	data, err := yaml.Marshal(cfg)
+	if err != nil {
+		return fmt.Errorf("failed to marshal config: %w", err)
+	}
+
+	configPath := filepath.Join(wispDir, "config.yaml")
+	if err := os.WriteFile(configPath, data, 0o644); err != nil {
+		return fmt.Errorf("failed to write config file: %w", err)
+	}
+
+	return nil
 }

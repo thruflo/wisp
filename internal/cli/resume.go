@@ -6,13 +6,22 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/spf13/cobra"
+	"github.com/thruflo/wisp/internal/auth"
 	"github.com/thruflo/wisp/internal/config"
 	"github.com/thruflo/wisp/internal/loop"
+	"github.com/thruflo/wisp/internal/server"
 	"github.com/thruflo/wisp/internal/sprite"
 	"github.com/thruflo/wisp/internal/state"
 	"github.com/thruflo/wisp/internal/tui"
+)
+
+var (
+	resumeServer      bool
+	resumeServerPort  int
+	resumeSetPassword bool
 )
 
 var resumeCmd = &cobra.Command{
@@ -23,14 +32,26 @@ restoring state from local storage, and continuing the iteration loop.
 
 The branch argument is required and must match an existing session.
 
+Remote Access:
+  Use --server to start a web server alongside the TUI for monitoring and
+  interacting with the session from any device (phone, tablet, another computer).
+  On first use, you'll be prompted to set a password. Use --port to customize
+  the server port (default: 8374). Use --password to change the password.
+
 Example:
   wisp resume wisp/my-feature
-  wisp resume feature/auth-implementation`,
+  wisp resume feature/auth-implementation
+  wisp resume wisp/my-feature --server
+  wisp resume wisp/my-feature --server --port 9000`,
 	Args: cobra.ExactArgs(1),
 	RunE: runResume,
 }
 
 func init() {
+	resumeCmd.Flags().BoolVar(&resumeServer, "server", false, "start web server alongside TUI for remote access")
+	resumeCmd.Flags().IntVar(&resumeServerPort, "port", config.DefaultServerPort, "web server port (requires --server)")
+	resumeCmd.Flags().BoolVar(&resumeSetPassword, "password", false, "prompt to set/change web server password")
+
 	rootCmd.AddCommand(resumeCmd)
 }
 
@@ -60,6 +81,13 @@ func runResume(cmd *cobra.Command, args []string) error {
 	cfg, err := config.LoadConfig(cwd)
 	if err != nil {
 		return fmt.Errorf("failed to load config: %w", err)
+	}
+
+	// Handle server mode and password setup
+	if resumeServer || resumeSetPassword {
+		if err := handleResumeServerPassword(cwd, cfg, resumeServer, resumeSetPassword, resumeServerPort); err != nil {
+			return err
+		}
 	}
 
 	// Load settings
@@ -140,8 +168,51 @@ func runResume(cmd *cobra.Command, args []string) error {
 	// Get template directory
 	templateDir := filepath.Join(cwd, ".wisp", "templates", templateName)
 
+	// Create web server if enabled
+	var srv *server.Server
+	if resumeServer {
+		var err error
+		srv, err = server.NewServerFromConfig(cfg.Server)
+		if err != nil {
+			return fmt.Errorf("failed to create web server: %w", err)
+		}
+
+		// Start server in background
+		serverErrCh := make(chan error, 1)
+		go func() {
+			serverErrCh <- srv.Start(ctx)
+		}()
+
+		// Give the server a moment to start and check for errors
+		select {
+		case err := <-serverErrCh:
+			return fmt.Errorf("web server failed to start: %w", err)
+		case <-time.After(100 * time.Millisecond):
+			// Server started successfully
+		}
+
+		fmt.Printf("Web server running at http://localhost:%d\n", cfg.Server.Port)
+
+		// Ensure server is stopped when we exit
+		defer func() {
+			if err := srv.Stop(); err != nil {
+				fmt.Printf("Warning: failed to stop web server: %v\n", err)
+			}
+		}()
+	}
+
 	// Create and run loop
-	l := loop.NewLoop(client, syncMgr, store, cfg, session, t, repoPath, templateDir)
+	l := loop.NewLoopWithOptions(loop.LoopOptions{
+		Client:      client,
+		SyncManager: syncMgr,
+		Store:       store,
+		Config:      cfg,
+		Session:     session,
+		TUI:         t,
+		Server:      srv,
+		RepoPath:    repoPath,
+		TemplateDir: templateDir,
+	})
 
 	fmt.Printf("Resuming iteration loop...\n")
 
@@ -352,6 +423,52 @@ func checkoutBranch(ctx context.Context, client sprite.Client, spriteName, repoP
 	}
 	if exitCode != 0 {
 		return fmt.Errorf("checkout failed with exit code %d: %s", exitCode, string(stderr))
+	}
+
+	return nil
+}
+
+// handleResumeServerPassword handles password setup for the web server on resume.
+// It prompts for a password if needed and saves the hash to config.
+func handleResumeServerPassword(basePath string, cfg *config.Config, serverEnabled, setPassword bool, port int) error {
+	// Initialize server config if not present
+	if cfg.Server == nil {
+		cfg.Server = config.DefaultServerConfig()
+	}
+
+	// Update port from flag
+	cfg.Server.Port = port
+
+	// Check if we need to prompt for password
+	needsPassword := false
+
+	if setPassword {
+		// User explicitly wants to set/change password
+		needsPassword = true
+	} else if serverEnabled && cfg.Server.PasswordHash == "" {
+		// Server mode enabled but no password configured
+		needsPassword = true
+	}
+
+	if needsPassword {
+		password, err := auth.PromptAndConfirmPassword()
+		if err != nil {
+			return fmt.Errorf("password setup failed: %w", err)
+		}
+
+		hash, err := auth.HashPassword(password)
+		if err != nil {
+			return fmt.Errorf("failed to hash password: %w", err)
+		}
+
+		cfg.Server.PasswordHash = hash
+
+		// Save the updated config
+		if err := config.SaveConfig(basePath, cfg); err != nil {
+			return fmt.Errorf("failed to save config: %w", err)
+		}
+
+		fmt.Println("Password saved to config.")
 	}
 
 	return nil
