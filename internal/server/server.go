@@ -57,9 +57,15 @@ type Config struct {
 	Port         int
 	PasswordHash string
 	Assets       fs.FS // Optional: static assets filesystem. If nil, uses embedded assets.
+
+	// Relay mode configuration
+	SpriteURL       string // URL of the Sprite stream server (e.g., "http://localhost:8374")
+	SpriteAuthToken string // Optional authentication token for Sprite connection
 }
 
 // NewServer creates a new Server instance.
+// If SpriteURL is configured, the server operates in relay mode,
+// forwarding events from the Sprite to web clients.
 func NewServer(cfg *Config) (*Server, error) {
 	if cfg == nil {
 		return nil, errors.New("config is required")
@@ -68,7 +74,14 @@ func NewServer(cfg *Config) (*Server, error) {
 		return nil, errors.New("password hash is required")
 	}
 
-	streams, err := NewStreamManager()
+	// Create stream manager - either local or relay mode
+	var streams *StreamManager
+	var err error
+	if cfg.SpriteURL != "" {
+		streams, err = NewRelayStreamManager(cfg.SpriteURL, cfg.SpriteAuthToken)
+	} else {
+		streams, err = NewStreamManager()
+	}
 	if err != nil {
 		return nil, fmt.Errorf("failed to create stream manager: %w", err)
 	}
@@ -106,11 +119,20 @@ func (s *Server) Port() int {
 
 // Start starts the HTTP server.
 // The server runs until ctx is cancelled or Stop is called.
+// If in relay mode, also starts the relay from the Sprite.
 func (s *Server) Start(ctx context.Context) error {
 	s.mu.Lock()
 	if s.started {
 		s.mu.Unlock()
 		return errors.New("server already started")
+	}
+
+	// Start relay if in relay mode
+	if s.streams.IsRelayMode() {
+		if err := s.streams.StartRelay(ctx); err != nil {
+			s.mu.Unlock()
+			return fmt.Errorf("failed to start relay: %w", err)
+		}
 	}
 
 	// Create listener
@@ -503,8 +525,9 @@ func formatJSONResponse(messages []store.Message) []byte {
 }
 
 // handleInput handles POST /input for user responses.
-// Implements first-response-wins: if the request has already been responded to
-// (either from web or TUI), subsequent responses are rejected.
+// In relay mode, the input is forwarded to the Sprite.
+// In local mode, implements first-response-wins: if the request has already
+// been responded to (either from web or TUI), subsequent responses are rejected.
 func (s *Server) handleInput(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -532,7 +555,27 @@ func (s *Server) handleInput(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Use inputMu for input-specific operations (first-response-wins)
+	// In relay mode, forward the input to the Sprite
+	if s.streams != nil && s.streams.IsRelayMode() {
+		commandID := fmt.Sprintf("web-input-%s-%d", req.RequestID, time.Now().UnixNano())
+		ack, err := s.streams.SendInputResponseToSprite(r.Context(), commandID, req.RequestID, req.Response)
+		if err != nil {
+			http.Error(w, fmt.Sprintf("failed to send input to sprite: %v", err), http.StatusBadGateway)
+			return
+		}
+		if ack.Status == "error" {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusConflict)
+			fmt.Fprintf(w, `{"status":"error","error":%q}`, ack.Error)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		fmt.Fprintf(w, `{"status":"received"}`)
+		return
+	}
+
+	// Local mode: use inputMu for input-specific operations (first-response-wins)
 	s.inputMu.Lock()
 
 	// Check if this request has already been responded to

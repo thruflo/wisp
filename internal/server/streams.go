@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/durable-streams/durable-streams/packages/caddy-plugin/store"
+	"github.com/thruflo/wisp/internal/stream"
 )
 
 const (
@@ -104,6 +105,9 @@ type InputRequest struct {
 }
 
 // StreamManager wraps a MemoryStore for managing the event stream.
+// It can operate in two modes:
+// 1. Local mode: Events are stored locally (for testing or single-machine setup)
+// 2. Relay mode: Events are relayed from a remote Sprite via StreamClient
 type StreamManager struct {
 	store *store.MemoryStore
 	mu    sync.RWMutex
@@ -112,9 +116,15 @@ type StreamManager struct {
 	sessions      map[string]*Session
 	tasks         map[string]*Task
 	inputRequests map[string]*InputRequest
+
+	// Relay mode: connection to Sprite stream server
+	spriteClient *stream.StreamClient
+	relayCancel  context.CancelFunc
+	relayWg      sync.WaitGroup
 }
 
 // NewStreamManager creates a new StreamManager with an initialized MemoryStore.
+// This creates the manager in local mode (events stored locally).
 func NewStreamManager() (*StreamManager, error) {
 	memStore := store.NewMemoryStore()
 
@@ -134,6 +144,242 @@ func NewStreamManager() (*StreamManager, error) {
 	}, nil
 }
 
+// NewRelayStreamManager creates a StreamManager that relays events from a Sprite.
+// The spriteURL should be the base URL of the Sprite's stream server (e.g., "http://localhost:8374").
+// The authToken is optional authentication for the Sprite connection.
+func NewRelayStreamManager(spriteURL, authToken string) (*StreamManager, error) {
+	memStore := store.NewMemoryStore()
+
+	// Create the stream
+	_, _, err := memStore.Create(streamPath, store.CreateOptions{
+		ContentType: streamContentType,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("failed to create stream: %w", err)
+	}
+
+	// Create options for the stream client
+	var opts []stream.ClientOption
+	if authToken != "" {
+		opts = append(opts, stream.WithAuthToken(authToken))
+	}
+
+	client := stream.NewStreamClient(spriteURL, opts...)
+
+	sm := &StreamManager{
+		store:         memStore,
+		sessions:      make(map[string]*Session),
+		tasks:         make(map[string]*Task),
+		inputRequests: make(map[string]*InputRequest),
+		spriteClient:  client,
+	}
+
+	return sm, nil
+}
+
+// StartRelay starts the relay loop that forwards events from the Sprite to local clients.
+// This should be called after creating a relay StreamManager.
+// The relay runs in the background until StopRelay or Close is called.
+func (sm *StreamManager) StartRelay(ctx context.Context) error {
+	if sm.spriteClient == nil {
+		return errors.New("not in relay mode: no sprite client configured")
+	}
+
+	// Test connection
+	if err := sm.spriteClient.Connect(ctx); err != nil {
+		return fmt.Errorf("failed to connect to sprite: %w", err)
+	}
+
+	// Get initial state from Sprite
+	state, err := sm.spriteClient.GetState(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to get initial state: %w", err)
+	}
+
+	// Populate local state from snapshot
+	if err := sm.populateFromSnapshot(state); err != nil {
+		return fmt.Errorf("failed to populate initial state: %w", err)
+	}
+
+	// Create cancelable context for relay
+	relayCtx, cancel := context.WithCancel(ctx)
+	sm.relayCancel = cancel
+
+	// Start relay goroutine
+	sm.relayWg.Add(1)
+	go sm.relayLoop(relayCtx, state.LastSeq)
+
+	return nil
+}
+
+// StopRelay stops the relay loop.
+func (sm *StreamManager) StopRelay() {
+	if sm.relayCancel != nil {
+		sm.relayCancel()
+		sm.relayWg.Wait()
+		sm.relayCancel = nil
+	}
+}
+
+// populateFromSnapshot initializes local state from a Sprite state snapshot.
+func (sm *StreamManager) populateFromSnapshot(state *stream.StateSnapshot) error {
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+
+	// Convert and store session
+	if state.Session != nil {
+		session := convertSessionEventToSession(state.Session)
+		sm.sessions[session.ID] = session
+		if err := sm.appendUnlocked(StreamMessage{
+			Type: MessageTypeSession,
+			Data: session,
+		}); err != nil {
+			return err
+		}
+	}
+
+	// Convert and store tasks
+	for _, taskEvent := range state.Tasks {
+		task := convertTaskEventToTask(taskEvent)
+		sm.tasks[task.ID] = task
+		if err := sm.appendUnlocked(StreamMessage{
+			Type: MessageTypeTask,
+			Data: task,
+		}); err != nil {
+			return err
+		}
+	}
+
+	// Convert and store input request
+	if state.InputRequest != nil {
+		inputReq := convertInputRequestEventToInputRequest(state.InputRequest)
+		sm.inputRequests[inputReq.ID] = inputReq
+		if err := sm.appendUnlocked(StreamMessage{
+			Type: MessageTypeInputRequest,
+			Data: inputReq,
+		}); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+// relayLoop continuously reads events from the Sprite and broadcasts them locally.
+func (sm *StreamManager) relayLoop(ctx context.Context, fromSeq uint64) {
+	defer sm.relayWg.Done()
+
+	eventCh, errCh := sm.spriteClient.Subscribe(ctx, fromSeq+1)
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case err := <-errCh:
+			if err != nil && ctx.Err() == nil {
+				// Log error but don't crash - client will attempt reconnection
+				// In production, this would log properly
+				_ = err
+			}
+			return
+		case event, ok := <-eventCh:
+			if !ok {
+				return
+			}
+			sm.handleRelayedEvent(event)
+		}
+	}
+}
+
+// handleRelayedEvent processes an event received from the Sprite and broadcasts it locally.
+func (sm *StreamManager) handleRelayedEvent(event *stream.Event) {
+	switch event.Type {
+	case stream.MessageTypeSession:
+		sessionData, err := event.SessionData()
+		if err != nil {
+			return
+		}
+		session := convertSessionEventToSession(sessionData)
+		_ = sm.BroadcastSession(session)
+
+	case stream.MessageTypeTask:
+		taskData, err := event.TaskData()
+		if err != nil {
+			return
+		}
+		task := convertTaskEventToTask(taskData)
+		_ = sm.BroadcastTask(task)
+
+	case stream.MessageTypeClaudeEvent:
+		claudeData, err := event.ClaudeEventData()
+		if err != nil {
+			return
+		}
+		claudeEvent := convertClaudeEventToClaudeEvent(claudeData)
+		_ = sm.BroadcastClaudeEvent(claudeEvent)
+
+	case stream.MessageTypeInputRequest:
+		inputData, err := event.InputRequestData()
+		if err != nil {
+			return
+		}
+		inputReq := convertInputRequestEventToInputRequest(inputData)
+		_ = sm.BroadcastInputRequest(inputReq)
+
+	case stream.MessageTypeAck:
+		// Ack events are not relayed to web clients directly
+		// They are handled by the command sender
+	}
+}
+
+// convertSessionEventToSession converts a stream.SessionEvent to a server.Session.
+func convertSessionEventToSession(se *stream.SessionEvent) *Session {
+	return &Session{
+		ID:        se.ID,
+		Repo:      se.Repo,
+		Branch:    se.Branch,
+		Spec:      se.Spec,
+		Status:    SessionStatus(se.Status),
+		Iteration: se.Iteration,
+		StartedAt: se.StartedAt.Format(time.RFC3339),
+	}
+}
+
+// convertTaskEventToTask converts a stream.TaskEvent to a server.Task.
+func convertTaskEventToTask(te *stream.TaskEvent) *Task {
+	return &Task{
+		ID:        te.ID,
+		SessionID: te.SessionID,
+		Order:     te.Order,
+		Content:   te.Description,
+		Status:    TaskStatus(te.Status),
+	}
+}
+
+// convertClaudeEventToClaudeEvent converts a stream.ClaudeEvent to a server.ClaudeEvent.
+func convertClaudeEventToClaudeEvent(ce *stream.ClaudeEvent) *ClaudeEvent {
+	return &ClaudeEvent{
+		ID:        ce.ID,
+		SessionID: ce.SessionID,
+		Iteration: ce.Iteration,
+		Sequence:  ce.Sequence,
+		Message:   ce.Message,
+		Timestamp: ce.Timestamp.Format(time.RFC3339),
+	}
+}
+
+// convertInputRequestEventToInputRequest converts a stream.InputRequestEvent to a server.InputRequest.
+func convertInputRequestEventToInputRequest(ire *stream.InputRequestEvent) *InputRequest {
+	return &InputRequest{
+		ID:        ire.ID,
+		SessionID: ire.SessionID,
+		Iteration: ire.Iteration,
+		Question:  ire.Question,
+		Responded: ire.Responded,
+		Response:  ire.Response,
+	}
+}
+
 // Store returns the underlying MemoryStore.
 func (sm *StreamManager) Store() *store.MemoryStore {
 	return sm.store
@@ -146,6 +392,22 @@ func (sm *StreamManager) StreamPath() string {
 
 // append serializes and appends a message to the stream.
 func (sm *StreamManager) append(msg StreamMessage) error {
+	data, err := json.Marshal(msg)
+	if err != nil {
+		return fmt.Errorf("failed to marshal message: %w", err)
+	}
+
+	_, err = sm.store.Append(streamPath, data, store.AppendOptions{})
+	if err != nil {
+		return fmt.Errorf("failed to append message: %w", err)
+	}
+
+	return nil
+}
+
+// appendUnlocked is like append but doesn't acquire any locks.
+// Caller must hold sm.mu.Lock().
+func (sm *StreamManager) appendUnlocked(msg StreamMessage) error {
 	data, err := json.Marshal(msg)
 	if err != nil {
 		return fmt.Errorf("failed to marshal message: %w", err)
@@ -285,5 +547,55 @@ func (sm *StreamManager) GetCurrentState() (sessions []*Session, tasks []*Task, 
 
 // Close releases resources held by the StreamManager.
 func (sm *StreamManager) Close() error {
+	// Stop relay if running
+	sm.StopRelay()
+
 	return sm.store.Close()
+}
+
+// SpriteClient returns the underlying StreamClient for relay mode.
+// Returns nil if not in relay mode.
+func (sm *StreamManager) SpriteClient() *stream.StreamClient {
+	return sm.spriteClient
+}
+
+// IsRelayMode returns true if the StreamManager is in relay mode.
+func (sm *StreamManager) IsRelayMode() bool {
+	return sm.spriteClient != nil
+}
+
+// SendCommandToSprite forwards a command to the Sprite.
+// This only works in relay mode.
+func (sm *StreamManager) SendCommandToSprite(ctx context.Context, cmd *stream.Command) (*stream.Ack, error) {
+	if sm.spriteClient == nil {
+		return nil, errors.New("not in relay mode: no sprite client configured")
+	}
+	return sm.spriteClient.SendCommand(ctx, cmd)
+}
+
+// SendInputResponseToSprite sends an input response to the Sprite.
+// This only works in relay mode.
+func (sm *StreamManager) SendInputResponseToSprite(ctx context.Context, commandID, requestID, response string) (*stream.Ack, error) {
+	if sm.spriteClient == nil {
+		return nil, errors.New("not in relay mode: no sprite client configured")
+	}
+	return sm.spriteClient.SendInputResponse(ctx, commandID, requestID, response)
+}
+
+// SendKillCommandToSprite sends a kill command to the Sprite.
+// This only works in relay mode.
+func (sm *StreamManager) SendKillCommandToSprite(ctx context.Context, commandID string, deleteSprite bool) (*stream.Ack, error) {
+	if sm.spriteClient == nil {
+		return nil, errors.New("not in relay mode: no sprite client configured")
+	}
+	return sm.spriteClient.SendKillCommand(ctx, commandID, deleteSprite)
+}
+
+// SendBackgroundCommandToSprite sends a background command to the Sprite.
+// This only works in relay mode.
+func (sm *StreamManager) SendBackgroundCommandToSprite(ctx context.Context, commandID string) (*stream.Ack, error) {
+	if sm.spriteClient == nil {
+		return nil, errors.New("not in relay mode: no sprite client configured")
+	}
+	return sm.spriteClient.SendBackgroundCommand(ctx, commandID)
 }
