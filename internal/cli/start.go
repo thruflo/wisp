@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net/http"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -17,6 +18,7 @@ import (
 	"github.com/thruflo/wisp/internal/server"
 	"github.com/thruflo/wisp/internal/sprite"
 	"github.com/thruflo/wisp/internal/state"
+	"github.com/thruflo/wisp/internal/stream"
 	"github.com/thruflo/wisp/internal/tui"
 )
 
@@ -32,6 +34,25 @@ var (
 	startServer       bool
 	startServerPort   int
 	startSetPassword  bool
+)
+
+// SpriteRunner paths and settings.
+const (
+	// SpriteRunnerPort is the HTTP port wisp-sprite listens on.
+	SpriteRunnerPort = 8374
+
+	// SpriteRunnerBinaryPath is the path where the wisp-sprite binary is uploaded on the Sprite.
+	SpriteRunnerBinaryPath = "/var/local/wisp/bin/wisp-sprite"
+
+	// SpriteRunnerPIDPath is the path to the PID file for the running wisp-sprite process.
+	SpriteRunnerPIDPath = "/var/local/wisp/wisp-sprite.pid"
+
+	// SpriteRunnerLogPath is the path to the log file for wisp-sprite output.
+	SpriteRunnerLogPath = "/var/local/wisp/wisp-sprite.log"
+
+	// LocalSpriteRunnerPath is the path to the local wisp-sprite binary to upload.
+	// This is built by `make build-sprite`.
+	LocalSpriteRunnerPath = "bin/wisp-sprite"
 )
 
 // HeadlessResult is the JSON output format for headless mode.
@@ -576,6 +597,15 @@ func SetupSprite(
 		return "", fmt.Errorf("failed to copy Claude credentials: %w", err)
 	}
 
+	// Upload wisp-sprite binary
+	fmt.Printf("Uploading wisp-sprite binary...\n")
+	if err := UploadSpriteRunner(ctx, client, session.SpriteName, localBasePath); err != nil {
+		return "", fmt.Errorf("failed to upload wisp-sprite: %w", err)
+	}
+
+	// Start wisp-sprite (it will be started by the caller after task generation)
+	// Note: We don't start it here because tasks need to be generated first
+
 	return repoPath, nil
 }
 
@@ -787,4 +817,174 @@ func handleServerPassword(basePath string, cfg *config.Config, serverEnabled, se
 	}
 
 	return nil
+}
+
+// UploadSpriteRunner uploads the wisp-sprite binary to the Sprite.
+// The binary must have been built with `make build-sprite` prior to calling this.
+// The binary is uploaded to /var/local/wisp/bin/wisp-sprite and made executable.
+// localBasePath should be the base path for the local wisp installation (where .wisp/ is located).
+func UploadSpriteRunner(ctx context.Context, client sprite.Client, spriteName, localBasePath string) error {
+	// Read local binary
+	binaryPath := filepath.Join(localBasePath, LocalSpriteRunnerPath)
+	content, err := os.ReadFile(binaryPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return fmt.Errorf("wisp-sprite binary not found at %s - run 'make build-sprite' first", binaryPath)
+		}
+		return fmt.Errorf("failed to read wisp-sprite binary: %w", err)
+	}
+
+	// Ensure parent directory exists
+	binDir := filepath.Dir(SpriteRunnerBinaryPath)
+	_, _, exitCode, err := client.ExecuteOutput(ctx, spriteName, "", nil, "mkdir", "-p", binDir)
+	if err != nil {
+		return fmt.Errorf("failed to create bin directory: %w", err)
+	}
+	if exitCode != 0 {
+		return fmt.Errorf("mkdir failed with exit code %d", exitCode)
+	}
+
+	// Write binary to Sprite
+	if err := client.WriteFile(ctx, spriteName, SpriteRunnerBinaryPath, content); err != nil {
+		return fmt.Errorf("failed to upload wisp-sprite binary: %w", err)
+	}
+
+	// Make binary executable
+	_, stderr, exitCode, err := client.ExecuteOutput(ctx, spriteName, "", nil, "chmod", "+x", SpriteRunnerBinaryPath)
+	if err != nil {
+		return fmt.Errorf("failed to make wisp-sprite executable: %w", err)
+	}
+	if exitCode != 0 {
+		return fmt.Errorf("chmod failed with exit code %d: %s", exitCode, string(stderr))
+	}
+
+	return nil
+}
+
+// StartSpriteRunner starts the wisp-sprite binary on the Sprite using nohup.
+// The process is started in the background and will survive SSH disconnection.
+// The session ID is passed via the -session-id flag.
+// token is an optional authentication token for the HTTP server.
+// repoPath is the working directory for Claude execution.
+func StartSpriteRunner(ctx context.Context, client sprite.Client, spriteName, sessionID, repoPath, token string) error {
+	// Check if wisp-sprite is already running by checking for PID file
+	_, _, exitCode, _ := client.ExecuteOutput(ctx, spriteName, "", nil, "test", "-f", SpriteRunnerPIDPath)
+	if exitCode == 0 {
+		// PID file exists - check if process is actually running
+		_, _, exitCode, _ := client.ExecuteOutput(ctx, spriteName, "", nil,
+			"sh", "-c", fmt.Sprintf("kill -0 $(cat %s) 2>/dev/null", SpriteRunnerPIDPath))
+		if exitCode == 0 {
+			// Process is still running, no need to start again
+			return nil
+		}
+		// Process not running, remove stale PID file
+		client.ExecuteOutput(ctx, spriteName, "", nil, "rm", "-f", SpriteRunnerPIDPath)
+	}
+
+	// Build command arguments
+	args := []string{
+		SpriteRunnerBinaryPath,
+		"-port", fmt.Sprintf("%d", SpriteRunnerPort),
+		"-session-id", sessionID,
+		"-work-dir", repoPath,
+	}
+	if token != "" {
+		args = append(args, "-token", token)
+	}
+
+	// Build the nohup command that:
+	// 1. Redirects stdout/stderr to log file
+	// 2. Writes PID to file
+	// 3. Runs in background
+	cmdStr := fmt.Sprintf(
+		"nohup %s > %s 2>&1 & echo $! > %s",
+		strings.Join(args, " "),
+		SpriteRunnerLogPath,
+		SpriteRunnerPIDPath,
+	)
+
+	_, stderr, exitCode, err := client.ExecuteOutput(ctx, spriteName, "", nil, "sh", "-c", cmdStr)
+	if err != nil {
+		return fmt.Errorf("failed to start wisp-sprite: %w", err)
+	}
+	if exitCode != 0 {
+		return fmt.Errorf("failed to start wisp-sprite (exit %d): %s", exitCode, string(stderr))
+	}
+
+	return nil
+}
+
+// WaitForSpriteRunner waits for the wisp-sprite HTTP server to become ready.
+// It polls the /health endpoint until it returns successfully or the timeout is reached.
+// Returns the URL of the stream server on success.
+func WaitForSpriteRunner(ctx context.Context, client sprite.Client, spriteName string, timeout time.Duration) (string, error) {
+	const pollInterval = 500 * time.Millisecond
+	deadline := time.Now().Add(timeout)
+
+	// Build the health check URL using the Sprite's internal IP
+	// We'll use curl from within the Sprite to check the local server
+	healthCheckCmd := fmt.Sprintf("curl -s -o /dev/null -w '%%{http_code}' http://localhost:%d/health", SpriteRunnerPort)
+
+	for time.Now().Before(deadline) {
+		select {
+		case <-ctx.Done():
+			return "", ctx.Err()
+		default:
+		}
+
+		stdout, _, exitCode, err := client.ExecuteOutput(ctx, spriteName, "", nil, "sh", "-c", healthCheckCmd)
+		if err == nil && exitCode == 0 && strings.TrimSpace(string(stdout)) == "200" {
+			// Server is ready
+			// Return the stream URL that clients can connect to
+			// Note: In production, this would use the Sprite's external IP or a tunnel
+			// For now, return localhost URL that can be used with SSH port forwarding
+			streamURL := fmt.Sprintf("http://localhost:%d", SpriteRunnerPort)
+			return streamURL, nil
+		}
+
+		// Wait before next poll
+		select {
+		case <-ctx.Done():
+			return "", ctx.Err()
+		case <-time.After(pollInterval):
+			// Continue polling
+		}
+	}
+
+	// Timeout - try to get logs for debugging
+	logs, _, _, _ := client.ExecuteOutput(ctx, spriteName, "", nil, "tail", "-20", SpriteRunnerLogPath)
+	return "", fmt.Errorf("wisp-sprite did not become ready within %v\nLogs:\n%s", timeout, string(logs))
+}
+
+// ConnectToSpriteStream creates a stream client connected to the Sprite's stream server.
+// The connection is made via HTTP to the Sprite's stream server.
+// token is an optional authentication token.
+func ConnectToSpriteStream(ctx context.Context, client sprite.Client, spriteName, token string) (*stream.StreamClient, error) {
+	// Wait for the sprite runner to be ready
+	streamURL, err := WaitForSpriteRunner(ctx, client, spriteName, 30*time.Second)
+	if err != nil {
+		return nil, fmt.Errorf("wisp-sprite not ready: %w", err)
+	}
+
+	// Create stream client with authentication if provided
+	var opts []stream.ClientOption
+	if token != "" {
+		opts = append(opts, stream.WithAuthToken(token))
+	}
+
+	// Set up HTTP client with custom transport for connection to Sprite
+	// In production, this would use a tunnel or direct connection
+	httpClient := &http.Client{
+		Timeout: 0, // No timeout for streaming connections
+	}
+	opts = append(opts, stream.WithHTTPClient(httpClient))
+
+	streamClient := stream.NewStreamClient(streamURL, opts...)
+
+	// Test connection
+	if err := streamClient.Connect(ctx); err != nil {
+		return nil, fmt.Errorf("failed to connect to stream server: %w", err)
+	}
+
+	return streamClient, nil
 }
