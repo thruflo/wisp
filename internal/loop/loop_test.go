@@ -1868,3 +1868,247 @@ func TestLoopWithServerOption(t *testing.T) {
 	assert.NotNil(t, loop.server)
 	assert.Equal(t, srv, loop.server)
 }
+
+// TestUpdateTUIState tests that updateTUIState correctly updates TUI with task counts.
+func TestUpdateTUIState(t *testing.T) {
+	t.Parallel()
+
+	tmpDir := t.TempDir()
+	store := state.NewStore(tmpDir)
+	branch := "test-tui-update"
+
+	// Create session
+	session := &config.Session{
+		Branch:     branch,
+		SpriteName: "wisp-test",
+	}
+	require.NoError(t, store.CreateSession(session))
+
+	// Create tasks with 2 of 4 completed
+	tasks := []state.Task{
+		{Description: "Task 1", Passes: true},
+		{Description: "Task 2", Passes: true},
+		{Description: "Task 3", Passes: false},
+		{Description: "Task 4", Passes: false},
+	}
+	require.NoError(t, store.SaveTasks(branch, tasks))
+
+	// Create state
+	st := &state.State{
+		Status:  state.StatusContinue,
+		Summary: "Working on task 3",
+	}
+	require.NoError(t, store.SaveState(branch, st))
+
+	// Create TUI that we can inspect
+	mockClient := NewMockSpriteClient()
+	syncMgr := state.NewSyncManager(mockClient, store)
+	testTUI := tui.NewTUI(io.Discard)
+	cfg := &config.Config{
+		Limits: config.Limits{
+			MaxIterations: 10,
+		},
+	}
+
+	loop := NewLoopWithOptions(LoopOptions{
+		Client:      mockClient,
+		SyncManager: syncMgr,
+		Store:       store,
+		Config:      cfg,
+		Session:     session,
+		TUI:         testTUI,
+		RepoPath:    "/var/local/wisp/repos/org/repo",
+	})
+	loop.iteration = 3
+
+	// Call updateTUIState
+	loop.updateTUIState()
+
+	// Verify TUI state reflects the task counts
+	tuiState := testTUI.GetState()
+	assert.Equal(t, 2, tuiState.CompletedTasks, "TUI should show 2 completed tasks")
+	assert.Equal(t, 4, tuiState.TotalTasks, "TUI should show 4 total tasks")
+	assert.Equal(t, "Working on task 3", tuiState.LastSummary, "TUI should show the last summary")
+	assert.Equal(t, state.StatusContinue, tuiState.Status, "TUI should show CONTINUE status")
+	assert.Equal(t, branch, tuiState.Branch, "TUI should show correct branch")
+	assert.Equal(t, 3, tuiState.Iteration, "TUI should show correct iteration")
+}
+
+// TestTUIStateUpdatedAfterSync tests that TUI state is updated after SyncFromSprite.
+// This is a regression test for the bug where TUI was only updated before iteration,
+// not after syncing the updated state from Sprite.
+func TestTUIStateUpdatedAfterSync(t *testing.T) {
+	t.Parallel()
+
+	tmpDir := t.TempDir()
+	store := state.NewStore(tmpDir)
+	branch := "test-tui-after-sync"
+
+	// Create session
+	session := &config.Session{
+		Branch:     branch,
+		SpriteName: "wisp-test",
+	}
+	require.NoError(t, store.CreateSession(session))
+
+	// Create initial tasks locally - none completed
+	initialTasks := []state.Task{
+		{Description: "Task 1", Passes: false},
+		{Description: "Task 2", Passes: false},
+		{Description: "Task 3", Passes: false},
+	}
+	require.NoError(t, store.SaveTasks(branch, initialTasks))
+
+	// Setup mock client with updated tasks on "Sprite" - 2 completed
+	mockClient := NewMockSpriteClient()
+	updatedTasks := []state.Task{
+		{Description: "Task 1", Passes: true},
+		{Description: "Task 2", Passes: true},
+		{Description: "Task 3", Passes: false},
+	}
+	tasksJSON, err := json.Marshal(updatedTasks)
+	require.NoError(t, err)
+	mockClient.SetFile("/var/local/wisp/session/tasks.json", tasksJSON)
+
+	updatedState := &state.State{
+		Status:  state.StatusContinue,
+		Summary: "Completed tasks 1 and 2",
+	}
+	stateJSON, err := json.Marshal(updatedState)
+	require.NoError(t, err)
+	mockClient.SetFile("/var/local/wisp/session/state.json", stateJSON)
+
+	// Create TUI and loop
+	syncMgr := state.NewSyncManager(mockClient, store)
+	testTUI := tui.NewTUI(io.Discard)
+	cfg := &config.Config{
+		Limits: config.Limits{
+			MaxIterations: 10,
+		},
+	}
+
+	loop := NewLoopWithOptions(LoopOptions{
+		Client:      mockClient,
+		SyncManager: syncMgr,
+		Store:       store,
+		Config:      cfg,
+		Session:     session,
+		TUI:         testTUI,
+		RepoPath:    "/var/local/wisp/repos/org/repo",
+	})
+
+	// Initial TUI state should show 0 completed (from local store)
+	loop.updateTUIState()
+	initialState := testTUI.GetState()
+	assert.Equal(t, 0, initialState.CompletedTasks, "Initial TUI should show 0 completed")
+	assert.Equal(t, 3, initialState.TotalTasks, "Initial TUI should show 3 total")
+
+	// Sync from Sprite - this pulls the updated tasks
+	ctx := context.Background()
+	err = syncMgr.SyncFromSprite(ctx, session.SpriteName, branch)
+	require.NoError(t, err)
+
+	// Update TUI after sync (this is what the fix adds)
+	loop.updateTUIState()
+
+	// Verify TUI now shows updated state
+	afterSyncState := testTUI.GetState()
+	assert.Equal(t, 2, afterSyncState.CompletedTasks, "TUI should show 2 completed after sync")
+	assert.Equal(t, 3, afterSyncState.TotalTasks, "TUI should still show 3 total")
+	assert.Equal(t, "Completed tasks 1 and 2", afterSyncState.LastSummary, "TUI should show updated summary")
+}
+
+// TestTUIStateReflectsProgressDuringLoop tests that TUI state correctly reflects
+// task progress as tasks are completed during the loop execution.
+func TestTUIStateReflectsProgressDuringLoop(t *testing.T) {
+	t.Parallel()
+
+	tmpDir := t.TempDir()
+	store := state.NewStore(tmpDir)
+	branch := "test-tui-progress"
+
+	// Create session
+	session := &config.Session{
+		Branch:     branch,
+		SpriteName: "wisp-test",
+	}
+	require.NoError(t, store.CreateSession(session))
+
+	mockClient := NewMockSpriteClient()
+	syncMgr := state.NewSyncManager(mockClient, store)
+	testTUI := tui.NewTUI(io.Discard)
+	cfg := &config.Config{
+		Limits: config.Limits{
+			MaxIterations: 10,
+		},
+	}
+
+	loop := NewLoopWithOptions(LoopOptions{
+		Client:      mockClient,
+		SyncManager: syncMgr,
+		Store:       store,
+		Config:      cfg,
+		Session:     session,
+		TUI:         testTUI,
+		RepoPath:    "/var/local/wisp/repos/org/repo",
+	})
+
+	ctx := context.Background()
+
+	// Simulate iteration 1: 0 tasks completed
+	tasks1 := []state.Task{
+		{Description: "Task 1", Passes: false},
+		{Description: "Task 2", Passes: false},
+	}
+	tasksJSON1, _ := json.Marshal(tasks1)
+	mockClient.SetFile("/var/local/wisp/session/tasks.json", tasksJSON1)
+	stateJSON1, _ := json.Marshal(&state.State{Status: state.StatusContinue, Summary: "Starting"})
+	mockClient.SetFile("/var/local/wisp/session/state.json", stateJSON1)
+
+	err := syncMgr.SyncFromSprite(ctx, session.SpriteName, branch)
+	require.NoError(t, err)
+	loop.updateTUIState()
+
+	state1 := testTUI.GetState()
+	assert.Equal(t, 0, state1.CompletedTasks, "Iteration 1: 0 completed")
+	assert.Equal(t, 2, state1.TotalTasks, "Iteration 1: 2 total")
+
+	// Simulate iteration 2: 1 task completed
+	tasks2 := []state.Task{
+		{Description: "Task 1", Passes: true},
+		{Description: "Task 2", Passes: false},
+	}
+	tasksJSON2, _ := json.Marshal(tasks2)
+	mockClient.SetFile("/var/local/wisp/session/tasks.json", tasksJSON2)
+	stateJSON2, _ := json.Marshal(&state.State{Status: state.StatusContinue, Summary: "Task 1 done"})
+	mockClient.SetFile("/var/local/wisp/session/state.json", stateJSON2)
+
+	err = syncMgr.SyncFromSprite(ctx, session.SpriteName, branch)
+	require.NoError(t, err)
+	loop.updateTUIState()
+
+	state2 := testTUI.GetState()
+	assert.Equal(t, 1, state2.CompletedTasks, "Iteration 2: 1 completed")
+	assert.Equal(t, 2, state2.TotalTasks, "Iteration 2: 2 total")
+	assert.Equal(t, "Task 1 done", state2.LastSummary)
+
+	// Simulate iteration 3: all tasks completed
+	tasks3 := []state.Task{
+		{Description: "Task 1", Passes: true},
+		{Description: "Task 2", Passes: true},
+	}
+	tasksJSON3, _ := json.Marshal(tasks3)
+	mockClient.SetFile("/var/local/wisp/session/tasks.json", tasksJSON3)
+	stateJSON3, _ := json.Marshal(&state.State{Status: state.StatusDone, Summary: "All done"})
+	mockClient.SetFile("/var/local/wisp/session/state.json", stateJSON3)
+
+	err = syncMgr.SyncFromSprite(ctx, session.SpriteName, branch)
+	require.NoError(t, err)
+	loop.updateTUIState()
+
+	state3 := testTUI.GetState()
+	assert.Equal(t, 2, state3.CompletedTasks, "Iteration 3: 2 completed")
+	assert.Equal(t, 2, state3.TotalTasks, "Iteration 3: 2 total")
+	assert.Equal(t, "All done", state3.LastSummary)
+	assert.Equal(t, state.StatusDone, state3.Status)
+}
