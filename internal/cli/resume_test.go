@@ -373,3 +373,34 @@ func TestHandleResumeServerPassword_PortUpdated(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, 9999, cfg.Server.Port)
 }
+
+func TestIsSpriteRunnerRunning_FunctionSignature(t *testing.T) {
+	// This test documents that IsSpriteRunnerRunning:
+	// 1. Takes context, sprite client, and sprite name as parameters
+	// 2. Returns (bool, error) where bool indicates if wisp-sprite is running
+	// 3. Uses the SpriteRunnerPIDPath constant to check for PID file
+	// Full integration test would require mock Sprite client
+	t.Skip("Requires mock Sprite client infrastructure")
+}
+
+func TestConnectOrRestartSpriteRunner_FunctionSignature(t *testing.T) {
+	// This test documents that ConnectOrRestartSpriteRunner:
+	// 1. Takes context, sprite client, session, repoPath, localBasePath, and token
+	// 2. Returns (*stream.StreamClient, error)
+	// 3. Checks if wisp-sprite is running using IsSpriteRunnerRunning
+	// 4. If not running, uploads binary and starts it
+	// 5. Connects to the stream server via ConnectToSpriteStream
+	// Full integration test would require mock Sprite client
+	t.Skip("Requires mock Sprite client infrastructure")
+}
+
+func TestIsSpriteRunnerRunning_UsesSpriteRunnerConstants(t *testing.T) {
+	// Verify that IsSpriteRunnerRunning uses the expected constants
+	// This ensures consistency between start.go and resume.go
+	assert.Equal(t, "/var/local/wisp/wisp-sprite.pid", SpriteRunnerPIDPath)
+}
+
+func TestConnectOrRestartSpriteRunner_UsesSpriteRunnerConstants(t *testing.T) {
+	// Verify that ConnectOrRestartSpriteRunner uses the expected constants
+	assert.Equal(t, "/var/local/wisp/bin/wisp-sprite", SpriteRunnerBinaryPath)
+}

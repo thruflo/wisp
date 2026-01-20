@@ -15,6 +15,7 @@ import (
 	"github.com/thruflo/wisp/internal/server"
 	"github.com/thruflo/wisp/internal/sprite"
 	"github.com/thruflo/wisp/internal/state"
+	"github.com/thruflo/wisp/internal/stream"
 	"github.com/thruflo/wisp/internal/tui"
 )
 
@@ -472,4 +473,73 @@ func handleResumeServerPassword(basePath string, cfg *config.Config, serverEnabl
 	}
 
 	return nil
+}
+
+// IsSpriteRunnerRunning checks if the wisp-sprite process is running on the Sprite.
+// It checks for the PID file and verifies the process is alive.
+func IsSpriteRunnerRunning(ctx context.Context, client sprite.Client, spriteName string) (bool, error) {
+	// Check if PID file exists
+	_, _, exitCode, err := client.ExecuteOutput(ctx, spriteName, "", nil, "test", "-f", SpriteRunnerPIDPath)
+	if err != nil {
+		return false, fmt.Errorf("failed to check PID file: %w", err)
+	}
+	if exitCode != 0 {
+		// PID file doesn't exist
+		return false, nil
+	}
+
+	// PID file exists - check if process is actually running
+	_, _, exitCode, err = client.ExecuteOutput(ctx, spriteName, "", nil,
+		"sh", "-c", fmt.Sprintf("kill -0 $(cat %s) 2>/dev/null", SpriteRunnerPIDPath))
+	if err != nil {
+		return false, fmt.Errorf("failed to check process: %w", err)
+	}
+
+	return exitCode == 0, nil
+}
+
+// ConnectOrRestartSpriteRunner connects to an existing wisp-sprite process or restarts it.
+// Returns a stream client connected to the running process.
+// If the process is not running, it uploads the binary (if needed), starts it, and waits for it to be ready.
+func ConnectOrRestartSpriteRunner(
+	ctx context.Context,
+	client sprite.Client,
+	session *config.Session,
+	repoPath string,
+	localBasePath string,
+	token string,
+) (*stream.StreamClient, error) {
+	// Check if wisp-sprite is running
+	running, err := IsSpriteRunnerRunning(ctx, client, session.SpriteName)
+	if err != nil {
+		return nil, fmt.Errorf("failed to check if wisp-sprite is running: %w", err)
+	}
+
+	if running {
+		fmt.Printf("Connecting to existing wisp-sprite process...\n")
+	} else {
+		fmt.Printf("wisp-sprite not running, restarting...\n")
+
+		// Check if binary exists, upload if not
+		_, _, exitCode, _ := client.ExecuteOutput(ctx, session.SpriteName, "", nil, "test", "-x", SpriteRunnerBinaryPath)
+		if exitCode != 0 {
+			fmt.Printf("Uploading wisp-sprite binary...\n")
+			if err := UploadSpriteRunner(ctx, client, session.SpriteName, localBasePath); err != nil {
+				return nil, fmt.Errorf("failed to upload wisp-sprite: %w", err)
+			}
+		}
+
+		// Start wisp-sprite
+		if err := StartSpriteRunner(ctx, client, session.SpriteName, session.Branch, repoPath, token); err != nil {
+			return nil, fmt.Errorf("failed to start wisp-sprite: %w", err)
+		}
+	}
+
+	// Connect to the stream server
+	streamClient, err := ConnectToSpriteStream(ctx, client, session.SpriteName, token)
+	if err != nil {
+		return nil, fmt.Errorf("failed to connect to stream: %w", err)
+	}
+
+	return streamClient, nil
 }
