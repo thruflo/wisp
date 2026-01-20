@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"io"
 	"sync"
+
+	"github.com/thruflo/wisp/internal/stream"
 )
 
 // View represents the current TUI view.
@@ -86,6 +88,10 @@ type TUI struct {
 	height      int
 	running     bool
 	actionCh    chan ActionEvent
+
+	// Stream client integration (optional)
+	streamClient   *stream.StreamClient // Optional: for remote Sprite connection
+	inputRequestID string               // Current pending input request ID
 }
 
 // NewTUI creates a new TUI instance.
@@ -411,4 +417,207 @@ func (t *TUI) IsRunning() bool {
 // Bell sounds the terminal bell.
 func (t *TUI) Bell() {
 	t.terminal.RingBell()
+}
+
+// SetStreamClient configures the TUI to use a stream client for remote Sprite communication.
+// When set, user actions will be sent as stream commands instead of local channel events.
+func (t *TUI) SetStreamClient(client *stream.StreamClient) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.streamClient = client
+}
+
+// GetStreamClient returns the configured stream client, if any.
+func (t *TUI) GetStreamClient() *stream.StreamClient {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.streamClient
+}
+
+// HandleStreamEvent processes a stream event and updates the TUI state accordingly.
+// This is used when receiving events from a remote Sprite via StreamClient.
+func (t *TUI) HandleStreamEvent(event *stream.Event) {
+	if event == nil {
+		return
+	}
+
+	switch event.Type {
+	case stream.MessageTypeSession:
+		t.handleSessionEvent(event)
+	case stream.MessageTypeTask:
+		t.handleTaskEvent(event)
+	case stream.MessageTypeClaudeEvent:
+		t.handleClaudeEvent(event)
+	case stream.MessageTypeInputRequest:
+		t.handleInputRequestEvent(event)
+	}
+}
+
+// handleSessionEvent updates the TUI state from a session event.
+func (t *TUI) handleSessionEvent(event *stream.Event) {
+	data, err := event.SessionData()
+	if err != nil {
+		return
+	}
+
+	t.mu.Lock()
+	t.state.Branch = data.Branch
+	t.state.Iteration = data.Iteration
+	t.state.Status = string(data.Status)
+	t.mu.Unlock()
+
+	t.Update()
+}
+
+// handleTaskEvent updates the task count from a task event.
+// Note: Task events come individually, so we track the highest order seen.
+func (t *TUI) handleTaskEvent(event *stream.Event) {
+	data, err := event.TaskData()
+	if err != nil {
+		return
+	}
+
+	t.mu.Lock()
+	// Update total tasks based on order (0-indexed)
+	if data.Order+1 > t.state.TotalTasks {
+		t.state.TotalTasks = data.Order + 1
+	}
+
+	// Count completed tasks
+	if data.Status == stream.TaskStatusCompleted {
+		// We don't have full task list, so we can't accurately count.
+		// The state snapshot from GetState should be used for accurate counts.
+		// For now, we'll rely on the session event or explicit state updates.
+	}
+	t.mu.Unlock()
+}
+
+// handleClaudeEvent appends Claude output to the tail view.
+func (t *TUI) handleClaudeEvent(event *stream.Event) {
+	data, err := event.ClaudeEventData()
+	if err != nil {
+		return
+	}
+
+	// Extract displayable content from the Claude event
+	line := formatClaudeEventForDisplay(data)
+	if line != "" {
+		t.AppendTailLine(line)
+		t.Update()
+	}
+}
+
+// handleInputRequestEvent handles input request events.
+func (t *TUI) handleInputRequestEvent(event *stream.Event) {
+	data, err := event.InputRequestData()
+	if err != nil {
+		return
+	}
+
+	// If already responded, update state and return to summary
+	if data.Responded {
+		t.mu.Lock()
+		t.inputRequestID = ""
+		if t.view == ViewInput {
+			t.view = ViewSummary
+		}
+		t.mu.Unlock()
+		t.Update()
+		return
+	}
+
+	// Show input view for pending input request
+	t.mu.Lock()
+	t.inputRequestID = data.ID
+	t.mu.Unlock()
+
+	t.ShowInput(data.Question)
+	t.Bell()
+}
+
+// formatClaudeEventForDisplay extracts a displayable string from a Claude event.
+func formatClaudeEventForDisplay(data *stream.ClaudeEvent) string {
+	if data == nil || data.Message == nil {
+		return ""
+	}
+
+	// The Message field contains the raw SDK message.
+	// We need to extract relevant content for display.
+	// For simplicity, convert to string and truncate.
+	switch msg := data.Message.(type) {
+	case string:
+		if len(msg) > 200 {
+			return msg[:200] + "..."
+		}
+		return msg
+	case map[string]any:
+		// Try to extract text content
+		if content, ok := msg["content"]; ok {
+			if contentList, ok := content.([]any); ok {
+				for _, item := range contentList {
+					if itemMap, ok := item.(map[string]any); ok {
+						if itemMap["type"] == "text" {
+							if text, ok := itemMap["text"].(string); ok {
+								if len(text) > 200 {
+									return text[:200] + "..."
+								}
+								return text
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+
+	return ""
+}
+
+// UpdateFromSnapshot updates the TUI state from a state snapshot.
+// This is used for initial state sync and reconnection catch-up.
+func (t *TUI) UpdateFromSnapshot(snapshot *stream.StateSnapshot) {
+	if snapshot == nil {
+		return
+	}
+
+	t.mu.Lock()
+	defer t.mu.Unlock()
+
+	// Update session state
+	if snapshot.Session != nil {
+		t.state.Branch = snapshot.Session.Branch
+		t.state.Iteration = snapshot.Session.Iteration
+		t.state.Status = string(snapshot.Session.Status)
+	}
+
+	// Count tasks
+	t.state.TotalTasks = len(snapshot.Tasks)
+	completed := 0
+	for _, task := range snapshot.Tasks {
+		if task.Status == stream.TaskStatusCompleted {
+			completed++
+		}
+	}
+	t.state.CompletedTasks = completed
+
+	// Handle pending input request
+	if snapshot.InputRequest != nil && !snapshot.InputRequest.Responded {
+		t.inputRequestID = snapshot.InputRequest.ID
+		t.state.Question = snapshot.InputRequest.Question
+		// Don't automatically switch to input view - let caller decide
+	}
+}
+
+// InputRequestID returns the current pending input request ID.
+func (t *TUI) InputRequestID() string {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.inputRequestID
+}
+
+// SetInputRequestID sets the current pending input request ID.
+func (t *TUI) SetInputRequestID(id string) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.inputRequestID = id
 }
