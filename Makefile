@@ -1,4 +1,4 @@
-.PHONY: build test test-integration test-real-sprites test-e2e cleanup-test-sprites clean
+.PHONY: build build-sprite test test-integration test-real-sprites test-e2e cleanup-test-sprites clean
 
 # Default Go build flags
 GOFLAGS ?= -v
@@ -7,6 +7,11 @@ GOFLAGS ?= -v
 build:
 	go build $(GOFLAGS) -o wisp ./cmd/wisp
 	go build $(GOFLAGS) -o cleanup-test-sprites ./cmd/cleanup-test-sprites
+
+# Cross-compile wisp-sprite for Linux/amd64 (for Sprite VM deployment)
+build-sprite:
+	@mkdir -p bin
+	CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build $(GOFLAGS) -o bin/wisp-sprite ./cmd/wisp-sprite
 
 # Run unit tests
 test:
@@ -35,4 +40,5 @@ cleanup-test-sprites-force:
 # Clean build artifacts
 clean:
 	rm -f wisp cleanup-test-sprites
+	rm -rf bin
 	go clean ./...
