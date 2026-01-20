@@ -230,6 +230,9 @@ func (l *Loop) Run(ctx context.Context) Result {
 			}
 		}
 
+		// Update TUI with freshly synced state
+		l.updateTUIState()
+
 		// Broadcast state to web clients if server is running
 		l.broadcastState(iterResult)
 
