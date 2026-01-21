@@ -747,3 +747,140 @@ func readSSEEvent(r *bufio.Reader) (*stream.Event, error) {
 func init() {
 	_ = os.Stdout
 }
+
+func TestServerStartAndStop(t *testing.T) {
+	t.Parallel()
+
+	tmpDir := t.TempDir()
+	fs, err := stream.NewFileStore(filepath.Join(tmpDir, "stream.ndjson"))
+	require.NoError(t, err)
+	defer fs.Close()
+
+	// Use a high port to avoid conflicts
+	s := NewServer(ServerOptions{
+		Port:      19374 + time.Now().Nanosecond()%1000,
+		FileStore: fs,
+	})
+
+	// Server should not be running initially
+	assert.False(t, s.Running())
+
+	// Start the server
+	err = s.Start()
+	if err != nil {
+		// Port might be in use, skip test
+		t.Skipf("Could not start server (port in use?): %v", err)
+	}
+
+	// Server should now be running
+	assert.True(t, s.Running())
+
+	// Starting again should return error
+	err = s.Start()
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "already running")
+
+	// Stop the server
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	err = s.Stop(ctx)
+	assert.NoError(t, err)
+
+	// Server should no longer be running
+	assert.False(t, s.Running())
+
+	// Stopping again should be a no-op
+	err = s.Stop(ctx)
+	assert.NoError(t, err)
+}
+
+func TestServerStartWithInvalidPort(t *testing.T) {
+	t.Parallel()
+
+	tmpDir := t.TempDir()
+	fs, err := stream.NewFileStore(filepath.Join(tmpDir, "stream.ndjson"))
+	require.NoError(t, err)
+	defer fs.Close()
+
+	// Use port 1 which typically requires root permissions
+	s := NewServer(ServerOptions{
+		Port:      1, // Should fail without root
+		FileStore: fs,
+	})
+
+	err = s.Start()
+	// On most systems, this should fail (no permission to bind to port 1)
+	// But on some test environments it might work, so we just check the logic runs
+	if err != nil {
+		assert.Contains(t, err.Error(), "failed to start server")
+	} else {
+		// Clean up if it somehow worked
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
+		s.Stop(ctx)
+	}
+}
+
+func TestServerHealthEndpoint(t *testing.T) {
+	t.Parallel()
+
+	tmpDir := t.TempDir()
+	fs, err := stream.NewFileStore(filepath.Join(tmpDir, "stream.ndjson"))
+	require.NoError(t, err)
+	defer fs.Close()
+
+	port := 19500 + time.Now().Nanosecond()%1000
+	s := NewServer(ServerOptions{
+		Port:      port,
+		FileStore: fs,
+	})
+
+	err = s.Start()
+	if err != nil {
+		t.Skipf("Could not start server: %v", err)
+	}
+	defer func() {
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
+		s.Stop(ctx)
+	}()
+
+	// Wait for server to be ready
+	time.Sleep(50 * time.Millisecond)
+
+	// Make request to health endpoint
+	resp, err := http.Get(fmt.Sprintf("http://localhost:%d/health", port))
+	if err != nil {
+		t.Skipf("Could not connect to server: %v", err)
+	}
+	defer resp.Body.Close()
+
+	assert.Equal(t, http.StatusOK, resp.StatusCode)
+}
+
+func TestServerCommandEndpointNilProcessor(t *testing.T) {
+	t.Parallel()
+
+	tmpDir := t.TempDir()
+	fs, err := stream.NewFileStore(filepath.Join(tmpDir, "stream.ndjson"))
+	require.NoError(t, err)
+	defer fs.Close()
+
+	// Server with no command processor or loop
+	s := NewServer(ServerOptions{
+		FileStore:        fs,
+		CommandProcessor: nil,
+		Loop:             nil,
+	})
+
+	// Send command without processor - accepts but does nothing (graceful degradation)
+	body := `{"id": "cmd-1", "type": "kill"}`
+	req := httptest.NewRequest(http.MethodPost, "/command", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	s.handleCommand(w, req)
+
+	// Command is accepted even without processor/loop (fall-through behavior)
+	assert.Equal(t, http.StatusAccepted, w.Code)
+}

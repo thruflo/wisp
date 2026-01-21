@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/thruflo/wisp/internal/config"
 	"github.com/thruflo/wisp/internal/state"
 	"github.com/thruflo/wisp/internal/stream"
 )
@@ -604,5 +605,531 @@ func TestLoopPublishEvents(t *testing.T) {
 	}
 	if !foundClaude {
 		t.Error("Expected claude event to be published")
+	}
+}
+
+func TestLimitsFromConfig(t *testing.T) {
+	cfg := config.Limits{
+		MaxIterations:       50,
+		MaxBudgetUSD:        15.0,
+		MaxDurationHours:    4.0,
+		NoProgressThreshold: 3,
+	}
+
+	limits := LimitsFromConfig(cfg)
+
+	if limits.MaxIterations != 50 {
+		t.Errorf("MaxIterations = %d, want 50", limits.MaxIterations)
+	}
+	if limits.MaxBudgetUSD != 15.0 {
+		t.Errorf("MaxBudgetUSD = %f, want 15.0", limits.MaxBudgetUSD)
+	}
+	if limits.MaxDurationHours != 4.0 {
+		t.Errorf("MaxDurationHours = %f, want 4.0", limits.MaxDurationHours)
+	}
+	if limits.NoProgressThreshold != 3 {
+		t.Errorf("NoProgressThreshold = %d, want 3", limits.NoProgressThreshold)
+	}
+}
+
+func TestLoopCommandCh(t *testing.T) {
+	loop := NewLoop(LoopOptions{
+		SessionID: "test-session",
+	})
+
+	ch := loop.CommandCh()
+	if ch == nil {
+		t.Error("Expected non-nil command channel")
+	}
+
+	// Test that we can send a command
+	go func() {
+		cmd := &stream.Command{ID: "test-cmd", Type: stream.CommandTypeKill}
+		ch <- cmd
+	}()
+
+	select {
+	case cmd := <-loop.commandCh:
+		if cmd.ID != "test-cmd" {
+			t.Errorf("Expected command ID 'test-cmd', got %q", cmd.ID)
+		}
+	case <-time.After(100 * time.Millisecond):
+		t.Error("Command not received")
+	}
+}
+
+func TestLoopWriteResponse(t *testing.T) {
+	tmpDir := t.TempDir()
+	sessionDir := filepath.Join(tmpDir, "session")
+	os.MkdirAll(sessionDir, 0755)
+
+	loop := &Loop{
+		sessionDir: sessionDir,
+	}
+
+	// Write a response
+	err := loop.writeResponse("test response")
+	if err != nil {
+		t.Fatalf("writeResponse failed: %v", err)
+	}
+
+	// Read the response file
+	responsePath := filepath.Join(sessionDir, "response.json")
+	data, err := os.ReadFile(responsePath)
+	if err != nil {
+		t.Fatalf("Failed to read response file: %v", err)
+	}
+
+	var response string
+	if err := json.Unmarshal(data, &response); err != nil {
+		t.Fatalf("Failed to unmarshal response: %v", err)
+	}
+
+	if response != "test response" {
+		t.Errorf("Expected 'test response', got %q", response)
+	}
+}
+
+func TestLoopNeedsInputWithResponse(t *testing.T) {
+	tmpDir := t.TempDir()
+	sessionDir := filepath.Join(tmpDir, "session")
+	os.MkdirAll(sessionDir, 0755)
+
+	// Create file store
+	streamPath := filepath.Join(tmpDir, "stream.ndjson")
+	fs, _ := stream.NewFileStore(streamPath)
+	defer fs.Close()
+
+	loop := &Loop{
+		sessionID:  "test-session",
+		sessionDir: sessionDir,
+		fileStore:  fs,
+		iteration:  1,
+		inputCh:    make(chan string, 1),
+		commandCh:  make(chan *stream.Command, 10),
+	}
+
+	// Create a state that needs input
+	st := &state.State{
+		Status:   state.StatusNeedsInput,
+		Question: "What is your answer?",
+	}
+
+	// Send input response in a goroutine
+	go func() {
+		time.Sleep(50 * time.Millisecond)
+		loop.inputCh <- "my answer"
+	}()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+	defer cancel()
+
+	result := loop.handleNeedsInput(ctx, st)
+
+	// Should return unknown (continue loop) after receiving input
+	if result.Reason != ExitReasonUnknown {
+		t.Errorf("Expected ExitReasonUnknown, got %v", result.Reason)
+	}
+
+	// Check that response file was written
+	responsePath := filepath.Join(sessionDir, "response.json")
+	data, err := os.ReadFile(responsePath)
+	if err != nil {
+		t.Fatalf("Failed to read response file: %v", err)
+	}
+
+	var response string
+	if err := json.Unmarshal(data, &response); err != nil {
+		t.Fatalf("Failed to unmarshal response: %v", err)
+	}
+
+	if response != "my answer" {
+		t.Errorf("Expected 'my answer', got %q", response)
+	}
+}
+
+func TestLoopNeedsInputWithKillCommand(t *testing.T) {
+	tmpDir := t.TempDir()
+	sessionDir := filepath.Join(tmpDir, "session")
+	os.MkdirAll(sessionDir, 0755)
+
+	// Create file store
+	streamPath := filepath.Join(tmpDir, "stream.ndjson")
+	fs, _ := stream.NewFileStore(streamPath)
+	defer fs.Close()
+
+	loop := &Loop{
+		sessionID:  "test-session",
+		sessionDir: sessionDir,
+		fileStore:  fs,
+		iteration:  1,
+		inputCh:    make(chan string, 1),
+		commandCh:  make(chan *stream.Command, 10),
+	}
+
+	st := &state.State{
+		Status:   state.StatusNeedsInput,
+		Question: "What is your answer?",
+	}
+
+	// Send kill command in a goroutine
+	go func() {
+		time.Sleep(50 * time.Millisecond)
+		cmd, _ := stream.NewKillCommand("cmd-kill", false)
+		loop.commandCh <- cmd
+	}()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+	defer cancel()
+
+	result := loop.handleNeedsInput(ctx, st)
+
+	// Should return UserKill
+	if result.Reason != ExitReasonUserKill {
+		t.Errorf("Expected ExitReasonUserKill, got %v", result.Reason)
+	}
+}
+
+func TestLoopNeedsInputWithBackgroundCommand(t *testing.T) {
+	tmpDir := t.TempDir()
+	sessionDir := filepath.Join(tmpDir, "session")
+	os.MkdirAll(sessionDir, 0755)
+
+	// Create file store
+	streamPath := filepath.Join(tmpDir, "stream.ndjson")
+	fs, _ := stream.NewFileStore(streamPath)
+	defer fs.Close()
+
+	loop := &Loop{
+		sessionID:  "test-session",
+		sessionDir: sessionDir,
+		fileStore:  fs,
+		iteration:  1,
+		inputCh:    make(chan string, 1),
+		commandCh:  make(chan *stream.Command, 10),
+	}
+
+	st := &state.State{
+		Status:   state.StatusNeedsInput,
+		Question: "What is your answer?",
+	}
+
+	// Send background command in a goroutine
+	go func() {
+		time.Sleep(50 * time.Millisecond)
+		cmd := stream.NewBackgroundCommand("cmd-bg")
+		loop.commandCh <- cmd
+	}()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+	defer cancel()
+
+	result := loop.handleNeedsInput(ctx, st)
+
+	// Should return Background
+	if result.Reason != ExitReasonBackground {
+		t.Errorf("Expected ExitReasonBackground, got %v", result.Reason)
+	}
+}
+
+func TestLoopNeedsInputWithInputResponseCommand(t *testing.T) {
+	tmpDir := t.TempDir()
+	sessionDir := filepath.Join(tmpDir, "session")
+	os.MkdirAll(sessionDir, 0755)
+
+	// Create file store
+	streamPath := filepath.Join(tmpDir, "stream.ndjson")
+	fs, _ := stream.NewFileStore(streamPath)
+	defer fs.Close()
+
+	loop := &Loop{
+		sessionID:  "test-session",
+		sessionDir: sessionDir,
+		fileStore:  fs,
+		iteration:  1,
+		inputCh:    make(chan string, 1),
+		commandCh:  make(chan *stream.Command, 10),
+	}
+
+	st := &state.State{
+		Status:   state.StatusNeedsInput,
+		Question: "What is your answer?",
+	}
+
+	// The request ID format used by handleNeedsInput
+	expectedRequestID := "test-session-1-input"
+
+	// Send input response command in a goroutine
+	go func() {
+		time.Sleep(50 * time.Millisecond)
+		cmd, _ := stream.NewInputResponseCommand("cmd-input", expectedRequestID, "command response")
+		loop.commandCh <- cmd
+	}()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+	defer cancel()
+
+	result := loop.handleNeedsInput(ctx, st)
+
+	// Should return unknown (continue loop) after receiving input via command
+	if result.Reason != ExitReasonUnknown {
+		t.Errorf("Expected ExitReasonUnknown, got %v", result.Reason)
+	}
+}
+
+func TestLoopNeedsInputContextCancel(t *testing.T) {
+	tmpDir := t.TempDir()
+	sessionDir := filepath.Join(tmpDir, "session")
+	os.MkdirAll(sessionDir, 0755)
+
+	// Create file store
+	streamPath := filepath.Join(tmpDir, "stream.ndjson")
+	fs, _ := stream.NewFileStore(streamPath)
+	defer fs.Close()
+
+	loop := &Loop{
+		sessionID:  "test-session",
+		sessionDir: sessionDir,
+		fileStore:  fs,
+		iteration:  1,
+		inputCh:    make(chan string, 1),
+		commandCh:  make(chan *stream.Command, 10),
+	}
+
+	st := &state.State{
+		Status:   state.StatusNeedsInput,
+		Question: "What is your answer?",
+	}
+
+	// Cancel context immediately
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	result := loop.handleNeedsInput(ctx, st)
+
+	// Should return Background due to context cancellation
+	if result.Reason != ExitReasonBackground {
+		t.Errorf("Expected ExitReasonBackground, got %v", result.Reason)
+	}
+}
+
+func TestLoopCheckCommandsWithKill(t *testing.T) {
+	loop := &Loop{
+		commandCh: make(chan *stream.Command, 10),
+	}
+
+	// Send a kill command
+	cmd, _ := stream.NewKillCommand("cmd-1", false)
+	loop.commandCh <- cmd
+
+	result := loop.checkCommands()
+
+	if result.Reason != ExitReasonUserKill {
+		t.Errorf("Expected ExitReasonUserKill, got %v", result.Reason)
+	}
+}
+
+func TestLoopCheckCommandsWithBackground(t *testing.T) {
+	loop := &Loop{
+		commandCh: make(chan *stream.Command, 10),
+	}
+
+	// Send a background command
+	cmd := stream.NewBackgroundCommand("cmd-2")
+	loop.commandCh <- cmd
+
+	result := loop.checkCommands()
+
+	if result.Reason != ExitReasonBackground {
+		t.Errorf("Expected ExitReasonBackground, got %v", result.Reason)
+	}
+}
+
+func TestLoopCheckCommandsEmpty(t *testing.T) {
+	loop := &Loop{
+		commandCh: make(chan *stream.Command, 10),
+	}
+
+	result := loop.checkCommands()
+
+	if result.Reason != ExitReasonUnknown {
+		t.Errorf("Expected ExitReasonUnknown, got %v", result.Reason)
+	}
+}
+
+func TestLoopHandleCommand(t *testing.T) {
+	tmpDir := t.TempDir()
+	streamPath := filepath.Join(tmpDir, "stream.ndjson")
+	fs, _ := stream.NewFileStore(streamPath)
+	defer fs.Close()
+
+	loop := &Loop{
+		fileStore: fs,
+	}
+
+	t.Run("kill command", func(t *testing.T) {
+		cmd, _ := stream.NewKillCommand("cmd-1", false)
+		err := loop.handleCommand(cmd)
+		if err != errUserKill {
+			t.Errorf("Expected errUserKill, got %v", err)
+		}
+	})
+
+	t.Run("background command", func(t *testing.T) {
+		cmd := stream.NewBackgroundCommand("cmd-2")
+		err := loop.handleCommand(cmd)
+		if err != errUserBackground {
+			t.Errorf("Expected errUserBackground, got %v", err)
+		}
+	})
+
+	t.Run("input response command", func(t *testing.T) {
+		cmd, _ := stream.NewInputResponseCommand("cmd-3", "req-1", "response")
+		err := loop.handleCommand(cmd)
+		// Input response is handled elsewhere, returns nil
+		if err != nil {
+			t.Errorf("Expected nil error, got %v", err)
+		}
+	})
+
+	t.Run("unknown command", func(t *testing.T) {
+		cmd := &stream.Command{
+			ID:   "cmd-4",
+			Type: stream.CommandType("unknown"),
+		}
+		err := loop.handleCommand(cmd)
+		if err != nil {
+			t.Errorf("Expected nil error for unknown command, got %v", err)
+		}
+	})
+}
+
+func TestLoopBuildClaudeArgsWithLimitsBudget(t *testing.T) {
+	// Test that limits.MaxBudgetUSD is used when claudeCfg.MaxBudget is 0
+	loop := &Loop{
+		templateDir: "/var/local/wisp/templates",
+		claudeCfg: ClaudeConfig{
+			MaxTurns:     100,
+			MaxBudget:    0, // Not set
+			Verbose:      true,
+			OutputFormat: "stream-json",
+		},
+		limits: Limits{
+			MaxBudgetUSD: 25.0, // Should use this
+		},
+	}
+
+	args := loop.buildClaudeArgs()
+
+	foundBudget := false
+	for i, arg := range args {
+		if arg == "--max-budget-usd" && i+1 < len(args) {
+			if args[i+1] == "25.00" {
+				foundBudget = true
+			}
+		}
+	}
+
+	if !foundBudget {
+		t.Error("Expected '--max-budget-usd 25.00' in args")
+	}
+}
+
+func TestLoopReadTasksError(t *testing.T) {
+	loop := &Loop{
+		sessionDir: "/nonexistent/path",
+	}
+
+	// Should return empty slice for non-existent file
+	tasks, err := loop.readTasks()
+	if err == nil && tasks != nil && len(tasks) > 0 {
+		t.Error("Expected empty tasks for non-existent file")
+	}
+}
+
+func TestLoopReadTasksInvalidJSON(t *testing.T) {
+	tmpDir := t.TempDir()
+	sessionDir := filepath.Join(tmpDir, "session")
+	os.MkdirAll(sessionDir, 0755)
+
+	// Write invalid JSON
+	os.WriteFile(filepath.Join(sessionDir, "tasks.json"), []byte("{invalid"), 0644)
+
+	loop := &Loop{
+		sessionDir: sessionDir,
+	}
+
+	_, err := loop.readTasks()
+	if err == nil {
+		t.Error("Expected error for invalid JSON")
+	}
+}
+
+func TestLoopAllTasksCompleteEmpty(t *testing.T) {
+	tmpDir := t.TempDir()
+	sessionDir := filepath.Join(tmpDir, "session")
+	os.MkdirAll(sessionDir, 0755)
+
+	// Write empty tasks
+	os.WriteFile(filepath.Join(sessionDir, "tasks.json"), []byte("[]"), 0644)
+
+	loop := &Loop{
+		sessionDir: sessionDir,
+	}
+
+	// Empty tasks should return false
+	if loop.allTasksComplete() {
+		t.Error("Expected false for empty tasks")
+	}
+}
+
+func TestLoopPublishEventNoFileStore(t *testing.T) {
+	loop := &Loop{
+		fileStore: nil,
+	}
+
+	// Should not panic
+	loop.publishEvent(stream.MessageTypeSession, &stream.SessionEvent{})
+}
+
+func TestLoopPublishClaudeEventInvalidJSON(t *testing.T) {
+	tmpDir := t.TempDir()
+	streamPath := filepath.Join(tmpDir, "stream.ndjson")
+	fs, _ := stream.NewFileStore(streamPath)
+	defer fs.Close()
+
+	loop := &Loop{
+		fileStore: fs,
+		sessionID: "test",
+		iteration: 1,
+	}
+
+	// Should not panic with invalid JSON
+	loop.publishClaudeEvent("not valid json")
+
+	// Verify no event was published
+	events, _ := fs.Read(0)
+	if len(events) > 0 {
+		t.Error("Expected no events for invalid JSON")
+	}
+}
+
+func TestLoopPublishClaudeEventEmpty(t *testing.T) {
+	tmpDir := t.TempDir()
+	streamPath := filepath.Join(tmpDir, "stream.ndjson")
+	fs, _ := stream.NewFileStore(streamPath)
+	defer fs.Close()
+
+	loop := &Loop{
+		fileStore: fs,
+	}
+
+	// Should not panic with empty line
+	loop.publishClaudeEvent("")
+
+	// Verify no event was published
+	events, _ := fs.Read(0)
+	if len(events) > 0 {
+		t.Error("Expected no events for empty line")
 	}
 }
