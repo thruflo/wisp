@@ -13,7 +13,7 @@ Wisp automates spec-driven development using pure bash loop Ralph in isolated [S
 ## Install
 
 ```bash
-go install github.com/thruflo/wisp@latest
+go install github.com/thruflo/wisp/cmd/wisp@latest
 ```
 
 ## Setup
