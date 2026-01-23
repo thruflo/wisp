@@ -9,6 +9,7 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/thruflo/wisp/internal/config"
+	"github.com/thruflo/wisp/internal/logging"
 	"github.com/thruflo/wisp/internal/loop"
 	"github.com/thruflo/wisp/internal/server"
 	"github.com/thruflo/wisp/internal/sprite"
@@ -154,6 +155,7 @@ func runResume(cmd *cobra.Command, args []string) error {
 		// Sync generated state from Sprite to local
 		if err := syncMgr.SyncFromSprite(ctx, session.SpriteName, branch); err != nil {
 			fmt.Printf("Warning: failed to sync initial state: %v\n", err)
+			logging.Warn("failed to sync initial state from sprite", "error", err, "sprite", session.SpriteName, "branch", branch)
 		}
 	}
 
@@ -205,6 +207,7 @@ func runResume(cmd *cobra.Command, args []string) error {
 		defer func() {
 			if err := srv.Stop(); err != nil {
 				fmt.Printf("Warning: failed to stop web server: %v\n", err)
+				logging.Warn("failed to stop web server", "error", err, "port", resumeServerPort)
 			}
 		}()
 	}
@@ -253,6 +256,7 @@ func runResume(cmd *cobra.Command, args []string) error {
 		s.Status = finalStatus
 	}); err != nil {
 		fmt.Printf("Warning: failed to update session status: %v\n", err)
+		logging.Warn("failed to update session status", "error", err, "branch", branch, "status", finalStatus)
 	}
 
 	// Print result

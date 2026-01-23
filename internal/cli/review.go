@@ -8,6 +8,7 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/thruflo/wisp/internal/config"
+	"github.com/thruflo/wisp/internal/logging"
 	"github.com/thruflo/wisp/internal/loop"
 	"github.com/thruflo/wisp/internal/sprite"
 	"github.com/thruflo/wisp/internal/state"
@@ -154,6 +155,7 @@ func runReview(cmd *cobra.Command, args []string) error {
 	// Sync state from Sprite to local
 	if err := syncMgr.SyncFromSprite(ctx, session.SpriteName, session.Branch); err != nil {
 		fmt.Printf("Warning: failed to sync state from Sprite: %v\n", err)
+		logging.Warn("failed to sync state from sprite", "error", err, "sprite", session.SpriteName, "branch", session.Branch)
 	}
 
 	// Update session status to running
@@ -203,6 +205,7 @@ func runReview(cmd *cobra.Command, args []string) error {
 		s.Status = finalStatus
 	}); err != nil {
 		fmt.Printf("Warning: failed to update session status: %v\n", err)
+		logging.Warn("failed to update session status", "error", err, "branch", session.Branch, "status", finalStatus)
 	}
 
 	// Print result

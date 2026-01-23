@@ -6,6 +6,7 @@ import (
 	"io"
 
 	"github.com/google/uuid"
+	"github.com/thruflo/wisp/internal/logging"
 	"github.com/thruflo/wisp/internal/stream"
 )
 
@@ -121,7 +122,7 @@ func (r *StreamRunner) Run(ctx context.Context) error {
 
 			// Convert action to stream command
 			if err := r.handleAction(ctx, action); err != nil {
-				// Non-fatal, just continue
+				logging.Warn("failed to handle TUI action", "error", err, "action", action.Action)
 				continue
 			}
 
@@ -138,11 +139,19 @@ func (r *StreamRunner) Run(ctx context.Context) error {
 func (r *StreamRunner) handleAction(ctx context.Context, action ActionEvent) error {
 	switch action.Action {
 	case ActionKill:
-		_, err := r.client.SendKillCommand(ctx, generateCommandID(), false)
+		commandID := generateCommandID()
+		_, err := r.client.SendKillCommand(ctx, commandID, false)
+		if err != nil {
+			logging.Warn("failed to send kill command", "error", err, "commandID", commandID)
+		}
 		return err
 
 	case ActionBackground:
-		_, err := r.client.SendBackgroundCommand(ctx, generateCommandID())
+		commandID := generateCommandID()
+		_, err := r.client.SendBackgroundCommand(ctx, commandID)
+		if err != nil {
+			logging.Warn("failed to send background command", "error", err, "commandID", commandID)
+		}
 		return err
 
 	case ActionSubmitInput:
@@ -150,8 +159,10 @@ func (r *StreamRunner) handleAction(ctx context.Context, action ActionEvent) err
 		if requestID == "" {
 			return nil
 		}
-		_, err := r.client.SendInputResponse(ctx, generateCommandID(), requestID, action.Input)
+		commandID := generateCommandID()
+		_, err := r.client.SendInputResponse(ctx, commandID, requestID, action.Input)
 		if err != nil {
+			logging.Warn("failed to send input response", "error", err, "commandID", commandID, "requestID", requestID)
 			return err
 		}
 		r.tui.SetInputRequestID("")

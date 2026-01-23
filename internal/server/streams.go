@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/durable-streams/durable-streams/packages/caddy-plugin/store"
+	"github.com/thruflo/wisp/internal/logging"
 	"github.com/thruflo/wisp/internal/stream"
 )
 
@@ -269,6 +270,7 @@ func (sm *StreamManager) populateFromSnapshot(state *stream.StateSnapshot) error
 func (sm *StreamManager) relayLoop(ctx context.Context, fromSeq uint64) {
 	defer sm.relayWg.Done()
 
+	logger := logging.With("component", "stream-relay")
 	eventCh, errCh := sm.spriteClient.Subscribe(ctx, fromSeq+1)
 
 	for {
@@ -277,9 +279,7 @@ func (sm *StreamManager) relayLoop(ctx context.Context, fromSeq uint64) {
 			return
 		case err := <-errCh:
 			if err != nil && ctx.Err() == nil {
-				// Log error but don't crash - client will attempt reconnection
-				// In production, this would log properly
-				_ = err
+				logger.Warn("sprite stream subscription error", "error", err, "fromSeq", fromSeq)
 			}
 			return
 		case event, ok := <-eventCh:
@@ -293,42 +293,57 @@ func (sm *StreamManager) relayLoop(ctx context.Context, fromSeq uint64) {
 
 // handleRelayedEvent processes an event received from the Sprite and broadcasts it locally.
 func (sm *StreamManager) handleRelayedEvent(event *stream.Event) {
+	logger := logging.With("component", "stream-relay").With("seq", event.Seq)
+
 	switch event.Type {
 	case stream.MessageTypeSession:
 		sessionData, err := event.SessionData()
 		if err != nil {
+			logger.Warn("failed to extract session data from event", "error", err)
 			return
 		}
 		session := convertSessionEventToSession(sessionData)
-		_ = sm.BroadcastSession(session)
+		if err := sm.BroadcastSession(session); err != nil {
+			logger.Warn("failed to broadcast session", "error", err, "sessionID", session.ID)
+		}
 
 	case stream.MessageTypeTask:
 		taskData, err := event.TaskData()
 		if err != nil {
+			logger.Warn("failed to extract task data from event", "error", err)
 			return
 		}
 		task := convertTaskEventToTask(taskData)
-		_ = sm.BroadcastTask(task)
+		if err := sm.BroadcastTask(task); err != nil {
+			logger.Warn("failed to broadcast task", "error", err, "taskID", task.ID)
+		}
 
 	case stream.MessageTypeClaudeEvent:
 		claudeData, err := event.ClaudeEventData()
 		if err != nil {
+			logger.Warn("failed to extract claude event data", "error", err)
 			return
 		}
 		claudeEvent := convertClaudeEventToClaudeEvent(claudeData)
-		_ = sm.BroadcastClaudeEvent(claudeEvent)
+		if err := sm.BroadcastClaudeEvent(claudeEvent); err != nil {
+			logger.Warn("failed to broadcast claude event", "error", err, "eventID", claudeEvent.ID)
+		}
 
 	case stream.MessageTypeInputRequest:
 		inputData, err := event.InputRequestData()
 		if err != nil {
+			logger.Warn("failed to extract input request data", "error", err)
 			return
 		}
 		inputReq := convertInputRequestEventToInputRequest(inputData)
-		_ = sm.BroadcastInputRequest(inputReq)
+		if err := sm.BroadcastInputRequest(inputReq); err != nil {
+			logger.Warn("failed to broadcast input request", "error", err, "requestID", inputReq.ID)
+		}
 
 	case stream.MessageTypeInputResponse:
 		responseData, err := event.InputResponseData()
 		if err != nil {
+			logger.Warn("failed to extract input response data", "error", err)
 			return
 		}
 		// Update the corresponding input request with the response

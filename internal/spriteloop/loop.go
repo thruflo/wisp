@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/thruflo/wisp/internal/config"
+	"github.com/thruflo/wisp/internal/logging"
 	"github.com/thruflo/wisp/internal/state"
 	"github.com/thruflo/wisp/internal/stream"
 )
@@ -131,6 +132,7 @@ type Loop struct {
 	// Dependencies
 	fileStore *stream.FileStore
 	executor  ClaudeExecutor // Interface for Claude execution (allows testing)
+	logger    *logging.Logger
 
 	// Command handling
 	commandCh chan *stream.Command // Channel for receiving commands
@@ -139,11 +141,11 @@ type Loop struct {
 
 // LoopOptions holds configuration for creating a Loop instance.
 type LoopOptions struct {
-	SessionID   string
-	RepoPath    string
-	SessionDir  string
-	TemplateDir string
-	Limits      Limits
+	SessionID    string
+	RepoPath     string
+	SessionDir   string
+	TemplateDir  string
+	Limits       Limits
 	ClaudeConfig ClaudeConfig
 	FileStore    *stream.FileStore
 	Executor     ClaudeExecutor
@@ -162,6 +164,9 @@ func NewLoop(opts LoopOptions) *Loop {
 		limits = DefaultLimits()
 	}
 
+	// Create logger with session context
+	logger := logging.With("session", opts.SessionID)
+
 	return &Loop{
 		sessionID:   opts.SessionID,
 		repoPath:    opts.RepoPath,
@@ -171,6 +176,7 @@ func NewLoop(opts LoopOptions) *Loop {
 		claudeCfg:   claudeCfg,
 		fileStore:   opts.FileStore,
 		executor:    opts.Executor,
+		logger:      logger,
 		startTime:   opts.StartTime,
 		commandCh:   make(chan *stream.Command, 10),
 		inputCh:     make(chan string, 1),
@@ -239,7 +245,7 @@ func (l *Loop) Run(ctx context.Context) Result {
 
 		// Record history
 		if err := l.recordHistory(iterResult); err != nil {
-			// Non-fatal, continue
+			l.logger.Warn("failed to record history", "error", err, "iteration", l.iteration)
 		}
 
 		// Publish task state
@@ -658,7 +664,6 @@ var (
 	errUserBackground = errors.New("user backgrounded session")
 )
 
-
 // publishSessionState publishes the current session state.
 func (l *Loop) publishSessionState(status stream.SessionStatus) {
 	session := &stream.Session{
@@ -680,15 +685,19 @@ func (l *Loop) publishSession(session *stream.Session) {
 	}
 	event, err := stream.NewSessionEvent(session)
 	if err != nil {
+		l.logger.Warn("failed to create session event", "error", err, "status", session.Status)
 		return
 	}
-	l.fileStore.Append(event)
+	if err := l.fileStore.Append(event); err != nil {
+		l.logger.Warn("failed to append session event", "error", err, "status", session.Status)
+	}
 }
 
 // publishTaskState publishes the current task states.
 func (l *Loop) publishTaskState() {
 	tasks, err := l.readTasks()
 	if err != nil {
+		l.logger.Warn("failed to read tasks for publishing", "error", err)
 		return
 	}
 
@@ -731,9 +740,12 @@ func (l *Loop) publishTask(task *stream.Task) {
 	}
 	event, err := stream.NewTaskEvent(task)
 	if err != nil {
+		l.logger.Warn("failed to create task event", "error", err, "taskID", task.ID)
 		return
 	}
-	l.fileStore.Append(event)
+	if err := l.fileStore.Append(event); err != nil {
+		l.logger.Warn("failed to append task event", "error", err, "taskID", task.ID)
+	}
 }
 
 // publishClaudeEvent publishes a Claude output line to the stream.
@@ -745,7 +757,7 @@ func (l *Loop) publishClaudeEvent(line string) {
 	// Try to parse as JSON to get the raw SDK message
 	var sdkMessage any
 	if err := json.Unmarshal([]byte(line), &sdkMessage); err != nil {
-		// Not valid JSON, skip
+		// Not valid JSON, skip (this is expected for non-JSON output)
 		return
 	}
 
@@ -761,9 +773,12 @@ func (l *Loop) publishClaudeEvent(line string) {
 
 	event, err := stream.NewClaudeEventEvent(ce)
 	if err != nil {
+		l.logger.Warn("failed to create claude event", "error", err, "iteration", l.iteration, "seq", l.eventSeq)
 		return
 	}
-	l.fileStore.Append(event)
+	if err := l.fileStore.Append(event); err != nil {
+		l.logger.Warn("failed to append claude event", "error", err, "iteration", l.iteration, "seq", l.eventSeq)
+	}
 }
 
 // publishAck publishes a command acknowledgment.
@@ -779,9 +794,12 @@ func (l *Loop) publishAck(commandID string, err error) {
 	}
 	event, eventErr := stream.NewAckEvent(ack)
 	if eventErr != nil {
+		l.logger.Warn("failed to create ack event", "error", eventErr, "commandID", commandID)
 		return
 	}
-	l.fileStore.Append(event)
+	if appendErr := l.fileStore.Append(event); appendErr != nil {
+		l.logger.Warn("failed to append ack event", "error", appendErr, "commandID", commandID)
+	}
 }
 
 // publishInputRequest publishes an input request event.
@@ -791,9 +809,12 @@ func (l *Loop) publishInputRequest(ir *stream.InputRequest) {
 	}
 	event, err := stream.NewInputRequestEvent(ir)
 	if err != nil {
+		l.logger.Warn("failed to create input request event", "error", err, "requestID", ir.ID)
 		return
 	}
-	l.fileStore.Append(event)
+	if err := l.fileStore.Append(event); err != nil {
+		l.logger.Warn("failed to append input request event", "error", err, "requestID", ir.ID)
+	}
 }
 
 // publishInputResponse publishes an input response event.
@@ -809,7 +830,10 @@ func (l *Loop) publishInputResponse(requestID, response string) {
 	}
 	event, err := stream.NewInputResponseEvent(ir)
 	if err != nil {
+		l.logger.Warn("failed to create input response event", "error", err, "requestID", requestID)
 		return
 	}
-	l.fileStore.Append(event)
+	if err := l.fileStore.Append(event); err != nil {
+		l.logger.Warn("failed to append input response event", "error", err, "requestID", requestID)
+	}
 }

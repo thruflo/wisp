@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/thruflo/wisp/internal/config"
+	"github.com/thruflo/wisp/internal/logging"
 	"github.com/thruflo/wisp/internal/server"
 	"github.com/thruflo/wisp/internal/sprite"
 	"github.com/thruflo/wisp/internal/state"
@@ -100,13 +101,14 @@ type Loop struct {
 	cfg          *config.Config
 	session      *config.Session
 	tui          *tui.TUI
-	server       *server.Server   // Optional web server for remote access
+	server       *server.Server       // Optional web server for remote access
 	streamClient *stream.StreamClient // Client for communicating with wisp-sprite
-	repoPath     string           // Path on Sprite: /var/local/wisp/repos/<org>/<repo>
+	repoPath     string               // Path on Sprite: /var/local/wisp/repos/<org>/<repo>
 	iteration    int
 	startTime    time.Time
 	templateDir  string       // Local path to templates
 	claudeCfg    ClaudeConfig // Claude command configuration (for compatibility)
+	logger       *logging.Logger
 }
 
 // LoopOptions holds configuration for creating a Loop instance.
@@ -158,6 +160,14 @@ func NewLoopWithOptions(opts LoopOptions) *Loop {
 		claudeCfg = DefaultClaudeConfig()
 	}
 
+	// Create logger with session context
+	var logger *logging.Logger
+	if opts.Session != nil {
+		logger = logging.With("session", opts.Session.Branch)
+	} else {
+		logger = logging.With("component", "loop")
+	}
+
 	return &Loop{
 		client:       opts.Client,
 		sync:         opts.SyncManager,
@@ -171,6 +181,7 @@ func NewLoopWithOptions(opts LoopOptions) *Loop {
 		templateDir:  opts.TemplateDir,
 		startTime:    opts.StartTime,
 		claudeCfg:    claudeCfg,
+		logger:       logger,
 	}
 }
 
@@ -452,14 +463,17 @@ func (l *Loop) handleTUIAction(ctx context.Context, action tui.ActionEvent) Resu
 		commandID := fmt.Sprintf("kill-%d", time.Now().UnixNano())
 		_, err := l.streamClient.SendKillCommand(ctx, commandID, false)
 		if err != nil {
-			// Command failed, but still exit
+			l.logger.Warn("failed to send kill command", "error", err, "commandID", commandID)
 		}
 		return Result{Reason: ExitReasonUserKill, Iterations: l.iteration}
 
 	case tui.ActionBackground, tui.ActionQuit:
 		// Send background command to Sprite
 		commandID := fmt.Sprintf("bg-%d", time.Now().UnixNano())
-		_, _ = l.streamClient.SendBackgroundCommand(ctx, commandID)
+		_, err := l.streamClient.SendBackgroundCommand(ctx, commandID)
+		if err != nil {
+			l.logger.Warn("failed to send background command", "error", err, "commandID", commandID)
+		}
 		return Result{Reason: ExitReasonBackground, Iterations: l.iteration}
 
 	case tui.ActionSubmitInput:
@@ -469,7 +483,7 @@ func (l *Loop) handleTUIAction(ctx context.Context, action tui.ActionEvent) Resu
 			commandID := fmt.Sprintf("input-%d", time.Now().UnixNano())
 			_, err := l.streamClient.SendInputResponse(ctx, commandID, requestID, action.Input)
 			if err != nil {
-				// Log error but continue
+				l.logger.Warn("failed to send input response", "error", err, "commandID", commandID, "requestID", requestID)
 			}
 			// Clear input request ID
 			l.tui.SetInputRequestID("")
@@ -486,7 +500,7 @@ func (l *Loop) handleTUIAction(ctx context.Context, action tui.ActionEvent) Resu
 // syncStateFromSprite syncs state files from Sprite to local storage.
 func (l *Loop) syncStateFromSprite(ctx context.Context) {
 	if err := l.sync.SyncFromSprite(ctx, l.session.SpriteName, l.session.Branch); err != nil {
-		// Non-fatal, log and continue
+		l.logger.Warn("failed to sync state from sprite", "error", err, "sprite", l.session.SpriteName)
 	}
 }
 
@@ -512,6 +526,7 @@ func (l *Loop) broadcastClaudeEvent(event *stream.Event) {
 
 	data, err := event.ClaudeEventData()
 	if err != nil {
+		l.logger.Warn("failed to extract claude event data for broadcast", "error", err, "seq", event.Seq)
 		return
 	}
 
@@ -524,7 +539,9 @@ func (l *Loop) broadcastClaudeEvent(event *stream.Event) {
 		Timestamp: data.Timestamp.Format(time.RFC3339),
 	}
 
-	streams.BroadcastClaudeEvent(webEvent)
+	if err := streams.BroadcastClaudeEvent(webEvent); err != nil {
+		l.logger.Warn("failed to broadcast claude event", "error", err, "eventID", data.ID)
+	}
 }
 
 // broadcastSession broadcasts session state to web clients.
@@ -561,7 +578,9 @@ func (l *Loop) broadcastSession(data *stream.SessionEvent) {
 		StartedAt: data.StartedAt.Format(time.RFC3339),
 	}
 
-	streams.BroadcastSession(session)
+	if err := streams.BroadcastSession(session); err != nil {
+		l.logger.Warn("failed to broadcast session", "error", err, "sessionID", data.ID)
+	}
 }
 
 // broadcastInputRequest broadcasts an input request to web clients.
@@ -586,7 +605,9 @@ func (l *Loop) broadcastInputRequest(data *stream.InputRequestEvent) {
 		Response:  nil,
 	}
 
-	streams.BroadcastInputRequest(req)
+	if err := streams.BroadcastInputRequest(req); err != nil {
+		l.logger.Warn("failed to broadcast input request", "error", err, "requestID", data.ID)
+	}
 }
 
 // Sentinel errors for user actions (for compatibility).

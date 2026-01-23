@@ -10,6 +10,7 @@ import (
 
 	"github.com/thruflo/wisp/internal/auth"
 	"github.com/thruflo/wisp/internal/config"
+	"github.com/thruflo/wisp/internal/logging"
 	"github.com/thruflo/wisp/internal/sprite"
 	"github.com/thruflo/wisp/internal/state"
 )
@@ -92,31 +93,38 @@ func handleExistingSprite(ctx context.Context, cfg SpriteSetupConfig, repoPath s
 		// Resume mode: reuse existing sprite, sync state
 		fmt.Printf("Resuming on existing Sprite %s...\n", session.SpriteName)
 
+		logger := logging.With("sprite", session.SpriteName).With("branch", session.Branch)
+
 		// Sync local state to sprite
 		if err := syncMgr.SyncToSprite(ctx, session.SpriteName, session.Branch); err != nil {
 			// State sync failed - sprite may be in bad state, warn but continue
 			fmt.Printf("Warning: failed to sync state to sprite: %v\n", err)
+			logger.Warn("failed to sync state to sprite", "error", err)
 		}
 
 		// Ensure spec file is present (may have been updated locally)
 		if err := CopySpecFile(ctx, client, session.SpriteName, cfg.LocalBasePath, session.Spec); err != nil {
 			fmt.Printf("Warning: failed to copy spec file: %v\n", err)
+			logger.Warn("failed to copy spec file", "error", err, "spec", session.Spec)
 		}
 
 		// Ensure templates are present (may have been updated locally)
 		templateDir := filepath.Join(cfg.LocalBasePath, ".wisp", "templates", cfg.TemplateName)
 		if err := syncMgr.CopyTemplatesToSprite(ctx, session.SpriteName, templateDir); err != nil {
 			fmt.Printf("Warning: failed to copy templates: %v\n", err)
+			logger.Warn("failed to copy templates", "error", err, "templateDir", templateDir)
 		}
 
 		// Ensure environment variables are present at the correct location
 		if err := InjectEnvVars(ctx, client, session.SpriteName, cfg.Env); err != nil {
 			fmt.Printf("Warning: failed to inject env vars: %v\n", err)
+			logger.Warn("failed to inject env vars", "error", err)
 		}
 
 		// Ensure Claude credentials are present (may have been refreshed locally)
 		if err := sprite.CopyClaudeCredentials(ctx, client, session.SpriteName); err != nil {
 			fmt.Printf("Warning: failed to copy Claude credentials: %v\n", err)
+			logger.Warn("failed to copy claude credentials", "error", err)
 		}
 
 		return repoPath, nil

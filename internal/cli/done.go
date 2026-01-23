@@ -13,6 +13,7 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/thruflo/wisp/internal/config"
+	"github.com/thruflo/wisp/internal/logging"
 	"github.com/thruflo/wisp/internal/sprite"
 	"github.com/thruflo/wisp/internal/state"
 )
@@ -121,6 +122,7 @@ func runDone(cmd *cobra.Command, args []string) error {
 		exists, err := client.Exists(ctx, session.SpriteName)
 		if err != nil {
 			fmt.Printf("Warning: failed to check Sprite status: %v\n", err)
+			logging.Warn("failed to check sprite status", "error", err, "sprite", session.SpriteName, "branch", branch)
 		}
 		spriteExists = exists
 
@@ -133,6 +135,7 @@ func runDone(cmd *cobra.Command, args []string) error {
 				// Sync divergence.md from Sprite
 				if err := syncDivergenceFromSprite(ctx, client, session.SpriteName, repoPath, store, branch); err != nil {
 					fmt.Printf("Warning: failed to sync divergence.md: %v\n", err)
+					logging.Warn("failed to sync divergence.md", "error", err, "sprite", session.SpriteName, "branch", branch)
 				}
 
 				// Push branch to remote (on Sprite)
@@ -147,6 +150,7 @@ func runDone(cmd *cobra.Command, args []string) error {
 		}
 	} else {
 		fmt.Printf("Warning: SPRITE_TOKEN not found, skipping Sprite operations.\n")
+		logging.Warn("sprite token not found, skipping sprite operations", "branch", branch)
 	}
 
 	// Prompt user for PR mode
@@ -185,6 +189,7 @@ func runDone(cmd *cobra.Command, args []string) error {
 		fmt.Printf("Tearing down Sprite...\n")
 		if err := client.Delete(ctx, session.SpriteName); err != nil {
 			fmt.Printf("Warning: failed to teardown Sprite: %v\n", err)
+			logging.Warn("failed to teardown sprite", "error", err, "sprite", session.SpriteName, "branch", branch)
 		} else {
 			fmt.Printf("Sprite teardown complete.\n")
 		}
@@ -316,6 +321,7 @@ func createPROnSprite(ctx context.Context, client sprite.Client, spriteName, rep
 	if err != nil {
 		// Fall back to simple title if LLM generation fails
 		fmt.Printf("Warning: LLM PR generation failed (%v), using fallback\n", err)
+		logging.Warn("LLM PR generation failed, using fallback", "error", err, "sprite", spriteName, "branch", branch)
 		prContent = &PRContent{
 			Title: buildFallbackPRTitle(tasks),
 			Body:  buildFallbackPRBody(tasks),

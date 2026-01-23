@@ -7,6 +7,7 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/thruflo/wisp/internal/config"
+	"github.com/thruflo/wisp/internal/logging"
 	"github.com/thruflo/wisp/internal/sprite"
 	"github.com/thruflo/wisp/internal/state"
 )
@@ -125,6 +126,7 @@ func runAbandonAll(ctx context.Context, cwd string, store *state.Store) error {
 		fmt.Printf("\nAbandoning session '%s'...\n", session.Branch)
 		if err := abandonSession(ctx, cwd, store, session); err != nil {
 			fmt.Printf("Warning: failed to abandon session '%s': %v\n", session.Branch, err)
+			logging.Warn("failed to abandon session", "error", err, "branch", session.Branch)
 		}
 	}
 
@@ -147,6 +149,7 @@ func abandonSession(ctx context.Context, cwd string, store *state.Store, session
 			fmt.Printf("Deleting Sprite '%s'...\n", session.SpriteName)
 			if err := client.Delete(ctx, session.SpriteName); err != nil {
 				fmt.Printf("Warning: failed to delete Sprite: %v\n", err)
+				logging.Warn("failed to delete sprite", "error", err, "sprite", session.SpriteName, "branch", session.Branch)
 			} else {
 				fmt.Println("Sprite deleted.")
 			}

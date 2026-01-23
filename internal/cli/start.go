@@ -13,6 +13,7 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/thruflo/wisp/internal/config"
+	"github.com/thruflo/wisp/internal/logging"
 	"github.com/thruflo/wisp/internal/loop"
 	"github.com/thruflo/wisp/internal/server"
 	"github.com/thruflo/wisp/internal/sprite"
@@ -22,17 +23,17 @@ import (
 )
 
 var (
-	startRepo         string
-	startSpec         string
-	startSiblingRepo  []string
-	startBranch       string
-	startTemplate     string
-	startCheckpoint   string
-	startHeadless     bool
-	startContinue     bool
-	startServer       bool
-	startServerPort   int
-	startSetPassword  bool
+	startRepo        string
+	startSpec        string
+	startSiblingRepo []string
+	startBranch      string
+	startTemplate    string
+	startCheckpoint  string
+	startHeadless    bool
+	startContinue    bool
+	startServer      bool
+	startServerPort  int
+	startSetPassword bool
 )
 
 // SpriteRunner paths and settings.
@@ -57,13 +58,13 @@ const (
 // HeadlessResult is the JSON output format for headless mode.
 // It contains the loop result and session information for testing/CI.
 type HeadlessResult struct {
-	Reason     string `json:"reason"`               // Exit reason (e.g., "completed", "max iterations")
-	Iterations int    `json:"iterations"`           // Number of iterations run
-	Branch     string `json:"branch"`               // Session branch name
-	SpriteName string `json:"sprite_name"`          // Sprite name
-	Error      string `json:"error,omitempty"`      // Error message if any
-	Status     string `json:"status,omitempty"`     // Final state status (DONE, CONTINUE, etc.)
-	Summary    string `json:"summary,omitempty"`    // Final state summary
+	Reason     string `json:"reason"`            // Exit reason (e.g., "completed", "max iterations")
+	Iterations int    `json:"iterations"`        // Number of iterations run
+	Branch     string `json:"branch"`            // Session branch name
+	SpriteName string `json:"sprite_name"`       // Sprite name
+	Error      string `json:"error,omitempty"`   // Error message if any
+	Status     string `json:"status,omitempty"`  // Final state status (DONE, CONTINUE, etc.)
+	Summary    string `json:"summary,omitempty"` // Final state summary
 }
 
 var startCmd = &cobra.Command{
@@ -240,6 +241,7 @@ func runStart(cmd *cobra.Command, args []string) error {
 	if err := syncMgr.SyncFromSprite(ctx, spriteName, branch); err != nil {
 		// Non-fatal, tasks might not exist yet
 		fmt.Printf("Warning: failed to sync initial state: %v\n", err)
+		logging.Warn("failed to sync initial state from sprite", "error", err, "sprite", spriteName, "branch", branch)
 	}
 
 	// Get template directory
@@ -282,6 +284,7 @@ func runStart(cmd *cobra.Command, args []string) error {
 		defer func() {
 			if err := srv.Stop(); err != nil {
 				fmt.Printf("Warning: failed to stop web server: %v\n", err)
+				logging.Warn("failed to stop web server", "error", err, "port", startServerPort)
 			}
 		}()
 	}
@@ -330,6 +333,7 @@ func runStart(cmd *cobra.Command, args []string) error {
 		s.Status = finalStatus
 	}); err != nil {
 		fmt.Printf("Warning: failed to update session status: %v\n", err)
+		logging.Warn("failed to update session status", "error", err, "branch", branch, "status", finalStatus)
 	}
 
 	// Print result
@@ -632,7 +636,6 @@ func RunCreateTasksPrompt(ctx context.Context, client sprite.Client, session *co
 	return sprite.RunTasksPrompt(ctx, client, session.SpriteName, repoPath,
 		createTasksPath, "RFC path: "+RemoteSpecPath, contextPath, 50)
 }
-
 
 // UploadSpriteRunner uploads the wisp-sprite binary to the Sprite.
 // The binary must have been built with `make build-sprite` prior to calling this.
