@@ -296,6 +296,10 @@ type InputResponse struct {
 	ID        string `json:"id"`
 	RequestID string `json:"request_id"`
 	Response  string `json:"response"`
+	// TxID is the transaction identifier for confirmation via awaitTxId().
+	// When a client appends an input_response, it includes a txid in the headers.
+	// The event with this txid becomes durable proof that the response was recorded.
+	TxID string `json:"txid,omitempty"`
 }
 
 // CommandType identifies the type of command sent from client to Sprite.

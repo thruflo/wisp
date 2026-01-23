@@ -727,10 +727,15 @@ func TestInputEndpoint(t *testing.T) {
 			t.Errorf("expected response 'test response', got '%s'", response)
 		}
 
-		// Getting it again should return not found (it's been consumed)
-		_, ok = server.GetPendingInput("req-123")
-		if ok {
-			t.Error("expected pending input to be consumed after first get")
+		// Per State Protocol, input responses are durable events - they persist
+		// and can be retrieved multiple times. This replaces the old one-time-use
+		// consumption model.
+		response2, ok := server.GetPendingInput("req-123")
+		if !ok {
+			t.Error("expected input to persist (State Protocol durable events)")
+		}
+		if response2 != "test response" {
+			t.Errorf("expected same response on second get, got '%s'", response2)
 		}
 	})
 }
@@ -864,29 +869,28 @@ func TestStreamLongPoll(t *testing.T) {
 func TestPendingInputConcurrency(t *testing.T) {
 	server := createTestServer(t)
 
-	// Test concurrent access to pending inputs
+	// Test concurrent access to pending inputs using StreamManager API
+	// (replaces direct map manipulation with State Protocol durable events)
 	var wg sync.WaitGroup
 	for i := 0; i < 10; i++ {
 		wg.Add(1)
 		go func(id int) {
 			defer wg.Done()
 			reqID := fmt.Sprintf("req-%d", id)
+			expectedResp := fmt.Sprintf("response-%d", id)
 
-			// Store
-			server.inputMu.Lock()
-			if server.pendingInputs == nil {
-				server.pendingInputs = make(map[string]string)
+			// Store via StreamManager (State Protocol HandleInputResponse)
+			if server.streams != nil {
+				server.streams.HandleInputResponse(reqID, expectedResp)
 			}
-			server.pendingInputs[reqID] = fmt.Sprintf("response-%d", id)
-			server.inputMu.Unlock()
 
-			// Retrieve
+			// Retrieve via GetPendingInput (uses StreamManager internally)
 			resp, ok := server.GetPendingInput(reqID)
 			if !ok {
 				t.Errorf("expected to find input %s", reqID)
 			}
-			if resp != fmt.Sprintf("response-%d", id) {
-				t.Errorf("wrong response for %s", reqID)
+			if resp != expectedResp {
+				t.Errorf("wrong response for %s: got %q, want %q", reqID, resp, expectedResp)
 			}
 		}(i)
 	}

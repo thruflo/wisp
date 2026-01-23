@@ -470,6 +470,9 @@ func (l *Loop) recordHistory(st *state.State) error {
 }
 
 // handleNeedsInput handles the NEEDS_INPUT state.
+// This uses stream-based event watching instead of polling, per the State Protocol.
+// Input responses are durably stored in the stream, enabling transaction confirmation
+// via the awaitTxId() pattern.
 func (l *Loop) handleNeedsInput(ctx context.Context, st *state.State) Result {
 	// Publish input request event
 	requestID := fmt.Sprintf("%s-%d-input", l.sessionID, l.iteration)
@@ -482,14 +485,24 @@ func (l *Loop) handleNeedsInput(ctx context.Context, st *state.State) Result {
 	l.publishInputRequest(inputReq)
 	l.publishSessionState(stream.SessionStatusNeedsInput)
 
-	// Wait for input response
+	// Start watching for input response in the stream (State Protocol bidirectional sync)
+	var watcher *stream.InputResponseWatcher
+	if l.fileStore != nil {
+		watcher = stream.NewInputResponseWatcher(l.fileStore, requestID)
+		watcher.Start(ctx)
+		defer watcher.Stop()
+	}
+
+	// Wait for input response from either:
+	// 1. inputCh (direct channel for backward compatibility)
+	// 2. Stream watcher (State Protocol durable events)
 	for {
 		select {
 		case <-ctx.Done():
 			return Result{Reason: ExitReasonBackground, Iterations: l.iteration}
 
 		case response := <-l.inputCh:
-			// Write response for the agent
+			// Direct channel input (backward compatible path)
 			if err := l.writeResponse(response); err != nil {
 				return Result{
 					Reason:     ExitReasonCrash,
@@ -501,8 +514,20 @@ func (l *Loop) handleNeedsInput(ctx context.Context, st *state.State) Result {
 			l.publishInputResponse(requestID, response)
 			return Result{Reason: ExitReasonUnknown}
 
+		case response := <-l.watcherResultCh(watcher):
+			// Stream-based input response (State Protocol bidirectional sync)
+			if err := l.writeResponse(response); err != nil {
+				return Result{
+					Reason:     ExitReasonCrash,
+					Iterations: l.iteration,
+					Error:      fmt.Errorf("failed to write response: %w", err),
+				}
+			}
+			// Response is already in the stream (published by client), no need to re-publish
+			return Result{Reason: ExitReasonUnknown}
+
 		case cmd := <-l.commandCh:
-			// Handle commands (input responses now come via inputCh)
+			// Handle commands (kill, background)
 			if err := l.handleCommand(cmd); err != nil {
 				if errors.Is(err, errUserKill) {
 					return Result{Reason: ExitReasonUserKill, Iterations: l.iteration}
@@ -511,12 +536,17 @@ func (l *Loop) handleNeedsInput(ctx context.Context, st *state.State) Result {
 					return Result{Reason: ExitReasonBackground, Iterations: l.iteration}
 				}
 			}
-
-		case <-time.After(100 * time.Millisecond):
-			// Poll periodically
-			continue
 		}
 	}
+}
+
+// watcherResultCh returns the result channel from a watcher, or a nil channel if watcher is nil.
+// This allows the select to safely handle the case where no watcher is configured.
+func (l *Loop) watcherResultCh(watcher *stream.InputResponseWatcher) <-chan string {
+	if watcher == nil {
+		return nil
+	}
+	return watcher.ResultCh()
 }
 
 // checkCommands checks for and processes any pending commands.

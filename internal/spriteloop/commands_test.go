@@ -20,9 +20,7 @@ func TestNewCommandProcessor(t *testing.T) {
 	if cp == nil {
 		t.Fatal("Expected non-nil CommandProcessor")
 	}
-	if cp.pendingInputs == nil {
-		t.Error("Expected pendingInputs map to be initialized")
-	}
+	// Note: pendingInputs map removed in favor of stream-based state tracking
 }
 
 func TestCommandProcessorKillCommand(t *testing.T) {
@@ -171,12 +169,9 @@ func TestCommandProcessorInputResponse(t *testing.T) {
 		t.Error("Expected success ack to be published")
 	}
 
-	// Verify input request was removed from pending
-	cp.mu.Lock()
-	if cp.pendingInputs["req-1"] {
-		t.Error("Expected input request to be removed from pending")
-	}
-	cp.mu.Unlock()
+	// Note: pendingInputs removed - input state is now tracked via stream events
+	// The input_request event in the stream marks pending state
+	// The input_response event marks completion
 }
 
 func TestCommandProcessorUnknownCommand(t *testing.T) {
@@ -227,23 +222,17 @@ func TestCommandProcessorUnknownCommand(t *testing.T) {
 func TestCommandProcessorRegisterInputRequest(t *testing.T) {
 	cp := NewCommandProcessor(CommandProcessorOptions{})
 
-	// Register an input request
+	// RegisterInputRequest is now a no-op - input state is tracked via stream events
+	// per the State Protocol bidirectional sync pattern
 	cp.RegisterInputRequest("req-1")
 
-	cp.mu.Lock()
-	if !cp.pendingInputs["req-1"] {
-		t.Error("Expected input request to be registered")
-	}
-	cp.mu.Unlock()
-
-	// Unregister
+	// UnregisterInputRequest is also a no-op
 	cp.UnregisterInputRequest("req-1")
 
-	cp.mu.Lock()
-	if cp.pendingInputs["req-1"] {
-		t.Error("Expected input request to be unregistered")
-	}
-	cp.mu.Unlock()
+	// These methods are kept for backward compatibility but do nothing
+	// since input state is now derived from stream events:
+	// - input_request events mark pending inputs
+	// - input_response events mark completed inputs
 }
 
 func TestCommandProcessorRunWithCancelledContext(t *testing.T) {

@@ -575,40 +575,35 @@ func (s *Server) handleInput(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Local mode: use inputMu for input-specific operations (first-response-wins)
-	s.inputMu.Lock()
-
-	// Check if this request has already been responded to
-	if s.respondedInputs != nil && s.respondedInputs[req.RequestID] {
-		s.inputMu.Unlock()
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusConflict)
-		fmt.Fprintf(w, `{"status":"already_responded"}`)
-		return
-	}
-
-	// Initialize maps if needed
-	if s.pendingInputs == nil {
-		s.pendingInputs = make(map[string]string)
-	}
-	if s.respondedInputs == nil {
-		s.respondedInputs = make(map[string]bool)
-	}
-
-	// Mark as responded and store the response
-	s.respondedInputs[req.RequestID] = true
-	s.pendingInputs[req.RequestID] = req.Response
-	s.inputMu.Unlock()
-
-	// Broadcast that this input request has been responded to
-	// This allows web clients to see the updated state immediately
+	// Local mode: use StreamManager for state tracking (State Protocol bidirectional sync)
+	// This replaces the previous in-memory pendingInputs/respondedInputs maps
 	if s.streams != nil {
-		inputReq := &InputRequest{
-			ID:        req.RequestID,
-			Responded: true,
-			Response:  &req.Response,
+		// Use StreamManager for input state - first response wins
+		if !s.streams.HandleInputResponse(req.RequestID, req.Response) {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusConflict)
+			fmt.Fprintf(w, `{"status":"already_responded"}`)
+			return
 		}
-		s.streams.BroadcastInputRequest(inputReq)
+	} else {
+		// Fallback to in-memory maps if no StreamManager (shouldn't happen in practice)
+		s.inputMu.Lock()
+		if s.respondedInputs != nil && s.respondedInputs[req.RequestID] {
+			s.inputMu.Unlock()
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusConflict)
+			fmt.Fprintf(w, `{"status":"already_responded"}`)
+			return
+		}
+		if s.pendingInputs == nil {
+			s.pendingInputs = make(map[string]string)
+		}
+		if s.respondedInputs == nil {
+			s.respondedInputs = make(map[string]bool)
+		}
+		s.respondedInputs[req.RequestID] = true
+		s.pendingInputs[req.RequestID] = req.Response
+		s.inputMu.Unlock()
 	}
 
 	// Return success
@@ -617,9 +612,16 @@ func (s *Server) handleInput(w http.ResponseWriter, r *http.Request) {
 	fmt.Fprintf(w, `{"status":"received"}`)
 }
 
-// GetPendingInput retrieves and removes a pending input response.
-// This is called by the loop when polling for web client input.
+// GetPendingInput retrieves a pending input response.
+// This is called by the loop to check for web client input.
+// Per State Protocol, input state is tracked via stream events.
 func (s *Server) GetPendingInput(requestID string) (string, bool) {
+	// Try StreamManager first (State Protocol bidirectional sync)
+	if s.streams != nil {
+		return s.streams.GetInputResponse(requestID)
+	}
+
+	// Fallback to in-memory maps
 	s.inputMu.Lock()
 	defer s.inputMu.Unlock()
 	if s.pendingInputs == nil {
@@ -635,7 +637,17 @@ func (s *Server) GetPendingInput(requestID string) (string, bool) {
 // MarkInputResponded marks an input request as responded.
 // This is called by the loop when the TUI provides input, to prevent
 // subsequent web client responses from being accepted.
+// Per State Protocol, this is now handled via stream events when possible.
 func (s *Server) MarkInputResponded(requestID string) {
+	// Try StreamManager first (State Protocol bidirectional sync)
+	// We use an empty response since we just want to mark it as responded
+	if s.streams != nil {
+		// Mark as responded with empty response (TUI provided real response elsewhere)
+		s.streams.HandleInputResponse(requestID, "")
+		return
+	}
+
+	// Fallback to in-memory maps
 	s.inputMu.Lock()
 	defer s.inputMu.Unlock()
 	if s.respondedInputs == nil {
@@ -645,7 +657,14 @@ func (s *Server) MarkInputResponded(requestID string) {
 }
 
 // IsInputResponded checks if an input request has already been responded to.
+// Per State Protocol, input state is tracked via stream events.
 func (s *Server) IsInputResponded(requestID string) bool {
+	// Try StreamManager first (State Protocol bidirectional sync)
+	if s.streams != nil {
+		return s.streams.IsInputResponded(requestID)
+	}
+
+	// Fallback to in-memory maps
 	s.inputMu.Lock()
 	defer s.inputMu.Unlock()
 	if s.respondedInputs == nil {

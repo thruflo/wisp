@@ -494,23 +494,61 @@ func (sm *StreamManager) BroadcastInputRequest(req *InputRequest) error {
 
 // HandleInputResponse updates an input request with the response.
 // This follows the State Protocol pattern where responses are separate events.
-func (sm *StreamManager) HandleInputResponse(requestID, response string) {
+// Returns true if the response was accepted (first response wins), false if already responded.
+func (sm *StreamManager) HandleInputResponse(requestID, response string) bool {
 	sm.mu.Lock()
 	defer sm.mu.Unlock()
 
 	req, ok := sm.inputRequests[requestID]
 	if !ok {
-		return
+		// Input request not found - create a new entry for tracking
+		req = &InputRequest{
+			ID:        requestID,
+			Responded: true,
+			Response:  &response,
+		}
+		sm.inputRequests[requestID] = req
+	} else if req.Responded {
+		// Already responded - first response wins (State Protocol conflict resolution)
+		return false
+	} else {
+		req.Responded = true
+		req.Response = &response
 	}
-
-	req.Responded = true
-	req.Response = &response
 
 	// Broadcast the updated input request so clients see the response
 	sm.appendUnlocked(StreamMessage{
 		Type: MessageTypeInputRequest,
 		Data: req,
 	})
+
+	return true
+}
+
+// IsInputResponded checks if an input request has already been responded to.
+// This provides stream-based state checking per the State Protocol.
+func (sm *StreamManager) IsInputResponded(requestID string) bool {
+	sm.mu.RLock()
+	defer sm.mu.RUnlock()
+
+	req, ok := sm.inputRequests[requestID]
+	if !ok {
+		return false
+	}
+	return req.Responded
+}
+
+// GetInputResponse retrieves the response for an input request if it exists.
+// Returns the response and true if found and responded, empty string and false otherwise.
+func (sm *StreamManager) GetInputResponse(requestID string) (string, bool) {
+	sm.mu.RLock()
+	defer sm.mu.RUnlock()
+
+	req, ok := sm.inputRequests[requestID]
+	if !ok || !req.Responded || req.Response == nil {
+		return "", false
+	}
+	return *req.Response, true
 }
 
 // BroadcastDelete broadcasts a deletion message.

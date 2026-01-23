@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"sync"
 	"time"
 
 	"github.com/thruflo/wisp/internal/stream"
@@ -13,6 +12,11 @@ import (
 // CommandProcessor handles incoming commands from the stream and delivers
 // them to the loop for processing. It subscribes to the stream for command
 // events and sends acknowledgments after processing.
+//
+// Input state is tracked via the stream (State Protocol bidirectional sync):
+// - input_request events mark pending inputs
+// - input_response events mark completed inputs
+// This replaces the previous in-memory pendingInputs map.
 type CommandProcessor struct {
 	// fileStore is used to subscribe to command events and publish acks
 	fileStore *stream.FileStore
@@ -22,12 +26,6 @@ type CommandProcessor struct {
 
 	// inputCh is the channel to deliver user input responses
 	inputCh chan<- string
-
-	// mu protects pendingInputs
-	mu sync.Mutex
-
-	// pendingInputs tracks pending input requests by ID
-	pendingInputs map[string]bool
 
 	// lastProcessedSeq tracks the last processed command sequence
 	lastProcessedSeq uint64
@@ -43,10 +41,9 @@ type CommandProcessorOptions struct {
 // NewCommandProcessor creates a new CommandProcessor with the given options.
 func NewCommandProcessor(opts CommandProcessorOptions) *CommandProcessor {
 	return &CommandProcessor{
-		fileStore:     opts.FileStore,
-		commandCh:     opts.CommandCh,
-		inputCh:       opts.InputCh,
-		pendingInputs: make(map[string]bool),
+		fileStore: opts.FileStore,
+		commandCh: opts.CommandCh,
+		inputCh:   opts.InputCh,
 	}
 }
 
@@ -130,18 +127,21 @@ func (cp *CommandProcessor) processInputResponseEvent(event *stream.Event) error
 
 // ProcessInputResponse processes a single input response. This can be called
 // directly for responses received via HTTP rather than through stream subscription.
+//
+// Per the State Protocol bidirectional sync pattern:
+// - Input state is validated by checking the stream for pending input_request events
+// - The response is forwarded to the loop via inputCh if available
+// - The response is already durably stored in the stream (appended by the client)
 func (cp *CommandProcessor) ProcessInputResponse(ir *stream.InputResponse) error {
-	// Check if this input request is pending
-	cp.mu.Lock()
-	isPending := cp.pendingInputs[ir.RequestID]
-	if isPending {
-		delete(cp.pendingInputs, ir.RequestID)
-	}
-	cp.mu.Unlock()
-
-	if !isPending {
-		// Input request not found - might have been answered already or timed out
-		// Still forward it - the loop will validate
+	// Per State Protocol: validate by checking stream for pending input_request.
+	// The presence of an input_request without a matching input_response indicates pending.
+	// This replaces the previous in-memory pendingInputs map.
+	if cp.fileStore != nil {
+		isPending := cp.isInputRequestPending(ir.RequestID)
+		if !isPending {
+			// Input request not found or already answered
+			// Still forward it - the loop will validate and handle appropriately
+		}
 	}
 
 	// Try to send to inputCh (direct path for NEEDS_INPUT)
@@ -159,6 +159,39 @@ func (cp *CommandProcessor) ProcessInputResponse(ir *stream.InputResponse) error
 
 	cp.publishAck(ir.ID, errors.New("no channel available for input response"))
 	return errors.New("no channel available for input response")
+}
+
+// isInputRequestPending checks if an input request is pending by examining the stream.
+// Per the State Protocol: presence of input_request without matching input_response = pending.
+func (cp *CommandProcessor) isInputRequestPending(requestID string) bool {
+	if cp.fileStore == nil {
+		return false
+	}
+
+	events, err := cp.fileStore.Read(0)
+	if err != nil {
+		return false
+	}
+
+	hasRequest := false
+	hasResponse := false
+
+	for _, event := range events {
+		switch event.Type {
+		case stream.MessageTypeInputRequest:
+			ir, err := event.InputRequestData()
+			if err == nil && ir.ID == requestID {
+				hasRequest = true
+			}
+		case stream.MessageTypeInputResponse:
+			ir, err := event.InputResponseData()
+			if err == nil && ir.RequestID == requestID {
+				hasResponse = true
+			}
+		}
+	}
+
+	return hasRequest && !hasResponse
 }
 
 // handleKill processes a kill command to stop the loop.
@@ -196,19 +229,18 @@ func (cp *CommandProcessor) handleBackground(cmd *stream.Command) error {
 }
 
 
-// RegisterInputRequest registers an input request as pending.
-// This allows the CommandProcessor to track which input requests are valid.
+// RegisterInputRequest is deprecated - input state is now tracked via stream events.
+// This is a no-op kept for backward compatibility.
+// Per State Protocol: input_request events in the stream mark pending inputs.
 func (cp *CommandProcessor) RegisterInputRequest(requestID string) {
-	cp.mu.Lock()
-	defer cp.mu.Unlock()
-	cp.pendingInputs[requestID] = true
+	// No-op: input state is tracked via stream events (State Protocol bidirectional sync)
 }
 
-// UnregisterInputRequest removes an input request from the pending list.
+// UnregisterInputRequest is deprecated - input state is now tracked via stream events.
+// This is a no-op kept for backward compatibility.
+// Per State Protocol: input_response events in the stream mark completed inputs.
 func (cp *CommandProcessor) UnregisterInputRequest(requestID string) {
-	cp.mu.Lock()
-	defer cp.mu.Unlock()
-	delete(cp.pendingInputs, requestID)
+	// No-op: input state is tracked via stream events (State Protocol bidirectional sync)
 }
 
 // publishAck publishes an acknowledgment event to the stream.
