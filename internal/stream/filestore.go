@@ -3,7 +3,6 @@
 package stream
 
 import (
-	"bufio"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -11,82 +10,138 @@ import (
 	"path/filepath"
 	"sync"
 	"time"
+
+	"github.com/durable-streams/durable-streams/packages/caddy-plugin/store"
 )
 
+// streamPath is the internal path used for the durable-streams store.
+const streamPath = "/wisp/events"
+
 // FileStore provides file-based persistent storage for stream events.
-// It is designed to run on the Sprite VM and provides durability across
+// It wraps the durable-streams FileStore to provide durability across
 // disconnections. Events are stored as newline-delimited JSON (NDJSON)
 // with sequence numbers assigned on append.
 type FileStore struct {
-	// path is the path to the stream file
+	// path is the original path provided (for backwards compatibility)
 	path string
 
-	// mu protects concurrent access to the file and sequence counter
+	// store is the underlying durable-streams file store
+	store *store.FileStore
+
+	// mu protects concurrent access to the sequence counter and closed state
 	mu sync.Mutex
 
-	// nextSeq is the next sequence number to assign
+	// nextSeq is the next sequence number to assign (1-based for our API)
 	nextSeq uint64
 
-	// file is the open file handle for appending
-	file *os.File
+	// closed indicates whether Close has been called
+	closed bool
+
+	// longPoll notifies subscribers of new events
+	longPoll *longPollManager
+}
+
+// longPollManager manages channels waiting for new events.
+type longPollManager struct {
+	mu      sync.Mutex
+	waiters []chan struct{}
+}
+
+func (lp *longPollManager) notify() {
+	lp.mu.Lock()
+	defer lp.mu.Unlock()
+	for _, ch := range lp.waiters {
+		select {
+		case ch <- struct{}{}:
+		default:
+		}
+	}
+}
+
+func (lp *longPollManager) register(ch chan struct{}) {
+	lp.mu.Lock()
+	defer lp.mu.Unlock()
+	lp.waiters = append(lp.waiters, ch)
+}
+
+func (lp *longPollManager) unregister(ch chan struct{}) {
+	lp.mu.Lock()
+	defer lp.mu.Unlock()
+	for i, w := range lp.waiters {
+		if w == ch {
+			lp.waiters = append(lp.waiters[:i], lp.waiters[i+1:]...)
+			break
+		}
+	}
 }
 
 // NewFileStore creates a new FileStore at the given path.
 // If the file exists, it reads existing events to determine the next sequence number.
 // If the file doesn't exist, it will be created on first Append.
 func NewFileStore(path string) (*FileStore, error) {
-	fs := &FileStore{
-		path:    path,
-		nextSeq: 1, // Sequence numbers start at 1
+	// Determine the data directory from the path
+	// The path is expected to be something like /var/local/wisp/session/stream.ndjson
+	// We'll use the parent directory for the durable-streams data
+	dir := filepath.Dir(path)
+	dataDir := filepath.Join(dir, ".stream-data")
+
+	// Create the durable-streams file store
+	dsStore, err := store.NewFileStore(store.FileStoreConfig{
+		DataDir:        dataDir,
+		MaxFileHandles: 10,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("failed to create durable-streams store: %w", err)
 	}
 
-	// If file exists, scan to find the highest sequence number
-	if _, err := os.Stat(path); err == nil {
-		maxSeq, err := fs.scanMaxSequence()
-		if err != nil {
-			return nil, fmt.Errorf("failed to scan existing events: %w", err)
-		}
-		fs.nextSeq = maxSeq + 1
+	// Create the stream (idempotent if already exists)
+	_, _, err = dsStore.Create(streamPath, store.CreateOptions{
+		ContentType: "application/json",
+	})
+	if err != nil {
+		dsStore.Close()
+		return nil, fmt.Errorf("failed to create stream: %w", err)
+	}
+
+	fs := &FileStore{
+		path:     path,
+		store:    dsStore,
+		nextSeq:  1,
+		longPoll: &longPollManager{},
+	}
+
+	// Scan existing events to determine next sequence number
+	if err := fs.scanMaxSequence(); err != nil {
+		dsStore.Close()
+		return nil, fmt.Errorf("failed to scan existing events: %w", err)
 	}
 
 	return fs, nil
 }
 
-// scanMaxSequence reads the file and returns the highest sequence number found.
-// Returns 0 if the file is empty.
-func (fs *FileStore) scanMaxSequence() (uint64, error) {
-	file, err := os.Open(fs.path)
+// scanMaxSequence reads all events and finds the highest sequence number.
+func (fs *FileStore) scanMaxSequence() error {
+	messages, _, err := fs.store.Read(streamPath, store.ZeroOffset)
 	if err != nil {
-		return 0, fmt.Errorf("failed to open file: %w", err)
+		if err == store.ErrStreamNotFound {
+			return nil
+		}
+		return err
 	}
-	defer file.Close()
 
 	var maxSeq uint64
-	scanner := bufio.NewScanner(file)
-	// Increase buffer size for potentially large events
-	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
-
-	for scanner.Scan() {
-		line := scanner.Bytes()
-		if len(line) == 0 {
-			continue
-		}
-
+	for _, msg := range messages {
 		var event Event
-		if err := json.Unmarshal(line, &event); err != nil {
-			// Skip malformed lines but log/continue
-			continue
+		if err := json.Unmarshal(msg.Data, &event); err != nil {
+			continue // Skip malformed events
 		}
 		if event.Seq > maxSeq {
 			maxSeq = event.Seq
 		}
 	}
 
-	if err := scanner.Err(); err != nil {
-		return 0, fmt.Errorf("failed to scan file: %w", err)
-	}
-
-	return maxSeq, nil
+	fs.nextSeq = maxSeq + 1
+	return nil
 }
 
 // Append writes an event to the stream file with an assigned sequence number.
@@ -105,32 +160,17 @@ func (fs *FileStore) Append(event *Event) error {
 		return fmt.Errorf("failed to marshal event: %w", err)
 	}
 
-	// Ensure directory exists
-	dir := filepath.Dir(fs.path)
-	if err := os.MkdirAll(dir, 0755); err != nil {
-		return fmt.Errorf("failed to create directory: %w", err)
-	}
-
-	// Open file for appending (create if not exists)
-	if fs.file == nil {
-		file, err := os.OpenFile(fs.path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
-		if err != nil {
-			return fmt.Errorf("failed to open file: %w", err)
-		}
-		fs.file = file
-	}
-
-	// Write event as a single line with newline
-	if _, err := fs.file.Write(append(data, '\n')); err != nil {
-		return fmt.Errorf("failed to write event: %w", err)
-	}
-
-	// Sync to ensure durability
-	if err := fs.file.Sync(); err != nil {
-		return fmt.Errorf("failed to sync file: %w", err)
+	// Append to the durable-streams store
+	_, err = fs.store.Append(streamPath, data, store.AppendOptions{})
+	if err != nil {
+		return fmt.Errorf("failed to append event: %w", err)
 	}
 
 	fs.nextSeq++
+
+	// Notify subscribers
+	fs.longPoll.notify()
+
 	return nil
 }
 
@@ -138,44 +178,25 @@ func (fs *FileStore) Append(event *Event) error {
 // Returns all events with Seq >= fromSeq.
 // If fromSeq is 0, all events are returned.
 func (fs *FileStore) Read(fromSeq uint64) ([]*Event, error) {
-	fs.mu.Lock()
-	defer fs.mu.Unlock()
-
-	// If file doesn't exist, return empty slice
-	if _, err := os.Stat(fs.path); os.IsNotExist(err) {
-		return []*Event{}, nil
-	}
-
-	file, err := os.Open(fs.path)
+	messages, _, err := fs.store.Read(streamPath, store.ZeroOffset)
 	if err != nil {
-		return nil, fmt.Errorf("failed to open file: %w", err)
+		if err == store.ErrStreamNotFound {
+			return []*Event{}, nil
+		}
+		return nil, fmt.Errorf("failed to read stream: %w", err)
 	}
-	defer file.Close()
 
 	var events []*Event
-	scanner := bufio.NewScanner(file)
-	// Increase buffer size for potentially large events
-	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
-
-	for scanner.Scan() {
-		line := scanner.Bytes()
-		if len(line) == 0 {
-			continue
-		}
-
+	for _, msg := range messages {
 		var event Event
-		if err := json.Unmarshal(line, &event); err != nil {
-			// Skip malformed lines
-			continue
+		if err := json.Unmarshal(msg.Data, &event); err != nil {
+			continue // Skip malformed events
 		}
 
 		if event.Seq >= fromSeq {
-			events = append(events, &event)
+			eventCopy := event
+			events = append(events, &eventCopy)
 		}
-	}
-
-	if err := scanner.Err(); err != nil {
-		return nil, fmt.Errorf("failed to scan file: %w", err)
 	}
 
 	return events, nil
@@ -195,6 +216,11 @@ func (fs *FileStore) Subscribe(ctx context.Context, fromSeq uint64, pollInterval
 		if nextSeq == 0 {
 			nextSeq = 1
 		}
+
+		// Register for notifications
+		notifyCh := make(chan struct{}, 1)
+		fs.longPoll.register(notifyCh)
+		defer fs.longPoll.unregister(notifyCh)
 
 		ticker := time.NewTicker(pollInterval)
 		defer ticker.Stop()
@@ -218,13 +244,27 @@ func (fs *FileStore) Subscribe(ctx context.Context, fromSeq uint64, pollInterval
 			select {
 			case <-ctx.Done():
 				return
+			case <-notifyCh:
+				// New data available, read immediately
+				events, err := fs.Read(nextSeq)
+				if err != nil {
+					continue
+				}
+				for _, event := range events {
+					select {
+					case <-ctx.Done():
+						return
+					case ch <- event:
+						if event.Seq >= nextSeq {
+							nextSeq = event.Seq + 1
+						}
+					}
+				}
 			case <-ticker.C:
 				events, err := fs.Read(nextSeq)
 				if err != nil {
-					// Log error but continue polling
 					continue
 				}
-
 				for _, event := range events {
 					select {
 					case <-ctx.Done():
@@ -255,19 +295,27 @@ func (fs *FileStore) LastSeq() uint64 {
 }
 
 // Close closes the file store and releases resources.
+// It is safe to call Close multiple times.
 func (fs *FileStore) Close() error {
 	fs.mu.Lock()
 	defer fs.mu.Unlock()
 
-	if fs.file != nil {
-		err := fs.file.Close()
-		fs.file = nil
-		return err
+	if fs.closed {
+		return nil
 	}
-	return nil
+	fs.closed = true
+
+	return fs.store.Close()
 }
 
 // Path returns the path to the stream file.
 func (fs *FileStore) Path() string {
 	return fs.path
+}
+
+// ensureLegacyPath ensures the original path directory exists for backwards compatibility.
+// This is a no-op since durable-streams handles its own storage.
+func ensureLegacyPath(path string) error {
+	dir := filepath.Dir(path)
+	return os.MkdirAll(dir, 0755)
 }

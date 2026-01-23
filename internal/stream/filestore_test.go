@@ -120,9 +120,10 @@ func TestFileStoreAppend(t *testing.T) {
 		event := MustNewEvent(MessageTypeSession, SessionEvent{ID: "sess-1"})
 		require.NoError(t, fs.Append(event))
 
-		// Verify file was created
-		_, err = os.Stat(path)
+		// Verify data was stored (durable-streams manages its own storage)
+		events, err := fs.Read(0)
 		require.NoError(t, err)
+		assert.Len(t, events, 1)
 	})
 
 	t.Run("persists events to disk", func(t *testing.T) {
@@ -143,12 +144,20 @@ func TestFileStoreAppend(t *testing.T) {
 		require.NoError(t, fs.Append(event))
 		fs.Close()
 
-		// Read file directly and verify content
-		content, err := os.ReadFile(path)
+		// Reopen and verify data persisted
+		fs2, err := NewFileStore(path)
 		require.NoError(t, err)
-		assert.Contains(t, string(content), "sess-test")
-		assert.Contains(t, string(content), "owner/repo")
-		assert.Contains(t, string(content), "main")
+		defer fs2.Close()
+
+		events, err := fs2.Read(0)
+		require.NoError(t, err)
+		require.Len(t, events, 1)
+
+		sessionData, err := events[0].SessionData()
+		require.NoError(t, err)
+		assert.Equal(t, "sess-test", sessionData.ID)
+		assert.Equal(t, "owner/repo", sessionData.Repo)
+		assert.Equal(t, "main", sessionData.Branch)
 	})
 }
 
@@ -603,67 +612,10 @@ func TestFileStoreLastSeq(t *testing.T) {
 	})
 }
 
-func TestFileStoreHandlesMalformedLines(t *testing.T) {
-	t.Parallel()
-
-	t.Run("scan skips malformed lines on init", func(t *testing.T) {
-		t.Parallel()
-
-		dir := t.TempDir()
-		path := filepath.Join(dir, "stream.ndjson")
-
-		// Write valid event, malformed line, valid event
-		event1 := MustNewEvent(MessageTypeSession, SessionEvent{ID: "sess-1"})
-		event1.Seq = 1
-		data1, _ := event1.Marshal()
-
-		event2 := MustNewEvent(MessageTypeTask, TaskEvent{ID: "task-1"})
-		event2.Seq = 3
-		data2, _ := event2.Marshal()
-
-		content := string(data1) + "\n{invalid json}\n" + string(data2) + "\n"
-		require.NoError(t, os.WriteFile(path, []byte(content), 0644))
-
-		// Should still initialize correctly
-		fs, err := NewFileStore(path)
-		require.NoError(t, err)
-		defer fs.Close()
-
-		// Should continue from sequence 4
-		assert.Equal(t, uint64(3), fs.LastSeq())
-	})
-
-	t.Run("read skips malformed lines", func(t *testing.T) {
-		t.Parallel()
-
-		dir := t.TempDir()
-		path := filepath.Join(dir, "stream.ndjson")
-
-		// Write valid event, malformed line, valid event
-		event1 := MustNewEvent(MessageTypeSession, SessionEvent{ID: "sess-1"})
-		event1.Seq = 1
-		data1, _ := event1.Marshal()
-
-		event2 := MustNewEvent(MessageTypeTask, TaskEvent{ID: "task-1"})
-		event2.Seq = 2
-		data2, _ := event2.Marshal()
-
-		content := string(data1) + "\n{invalid json}\n" + string(data2) + "\n"
-		require.NoError(t, os.WriteFile(path, []byte(content), 0644))
-
-		fs, err := NewFileStore(path)
-		require.NoError(t, err)
-		defer fs.Close()
-
-		events, err := fs.Read(0)
-		require.NoError(t, err)
-
-		// Should only return 2 valid events
-		assert.Len(t, events, 2)
-		assert.Equal(t, uint64(1), events[0].Seq)
-		assert.Equal(t, uint64(2), events[1].Seq)
-	})
-}
+// TestFileStoreHandlesMalformedLines is removed because the new durable-streams
+// based implementation manages its own internal storage format and does not
+// support manually writing malformed data to its storage. The durable-streams
+// library handles data integrity internally.
 
 func TestFileStoreMultipleEventTypes(t *testing.T) {
 	t.Parallel()
