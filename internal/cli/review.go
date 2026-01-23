@@ -118,7 +118,16 @@ func runReview(cmd *cobra.Command, args []string) error {
 	templateName := "default"
 
 	// Setup fresh Sprite for resume (same as resume command)
-	repoPath, err := setupSpriteForResume(ctx, client, syncMgr, session, settings, env, cwd, templateName)
+	repoPath, err := SetupSpriteWithConfig(ctx, SpriteSetupConfig{
+		Mode:          SpriteSetupModeResume,
+		Client:        client,
+		SyncManager:   syncMgr,
+		Session:       session,
+		Settings:      settings,
+		Env:           env,
+		LocalBasePath: cwd,
+		TemplateName:  templateName,
+	})
 	if err != nil {
 		return fmt.Errorf("failed to setup sprite: %w", err)
 	}

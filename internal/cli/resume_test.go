@@ -306,8 +306,8 @@ func TestResumeServerFlagsRegistered(t *testing.T) {
 	assert.Contains(t, passwordFlag.Usage, "password")
 }
 
-func TestHandleResumeServerPassword_NoServerConfig(t *testing.T) {
-	// Test that handleResumeServerPassword creates server config if missing
+func TestHandleServerPassword_NoServerConfig(t *testing.T) {
+	// Test that HandleServerPassword creates server config if missing
 	tmpDir := t.TempDir()
 	wispDir := filepath.Join(tmpDir, ".wisp")
 	require.NoError(t, os.MkdirAll(wispDir, 0o755))
@@ -317,7 +317,7 @@ func TestHandleResumeServerPassword_NoServerConfig(t *testing.T) {
 	}
 
 	// Not enabling server, not setting password - should be no-op
-	err := handleResumeServerPassword(tmpDir, cfg, false, false, 9000)
+	err := HandleServerPassword(tmpDir, cfg, false, false, 9000)
 	require.NoError(t, err)
 	// Server config should still be initialized since function was called
 	assert.NotNil(t, cfg.Server)
@@ -325,8 +325,8 @@ func TestHandleResumeServerPassword_NoServerConfig(t *testing.T) {
 	assert.Empty(t, cfg.Server.PasswordHash)
 }
 
-func TestHandleResumeServerPassword_WithExistingPassword(t *testing.T) {
-	// Test that handleResumeServerPassword doesn't prompt when password exists
+func TestHandleServerPassword_WithExistingPassword(t *testing.T) {
+	// Test that HandleServerPassword doesn't prompt when password exists
 	tmpDir := t.TempDir()
 	wispDir := filepath.Join(tmpDir, ".wisp")
 	require.NoError(t, os.MkdirAll(wispDir, 0o755))
@@ -344,14 +344,14 @@ func TestHandleResumeServerPassword_WithExistingPassword(t *testing.T) {
 	}
 
 	// Server enabled but password already set - should not prompt (no error)
-	err = handleResumeServerPassword(tmpDir, cfg, true, false, 8080)
+	err = HandleServerPassword(tmpDir, cfg, true, false, 8080)
 	require.NoError(t, err)
 	// Port should be updated, but password hash should be unchanged
 	assert.Equal(t, 8080, cfg.Server.Port)
 	assert.Equal(t, existingHash, cfg.Server.PasswordHash)
 }
 
-func TestHandleResumeServerPassword_PortUpdated(t *testing.T) {
+func TestHandleServerPassword_PortUpdated(t *testing.T) {
 	// Test that port is updated even when no password change needed
 	tmpDir := t.TempDir()
 	wispDir := filepath.Join(tmpDir, ".wisp")
@@ -369,7 +369,7 @@ func TestHandleResumeServerPassword_PortUpdated(t *testing.T) {
 	}
 
 	// Enable server with different port, password already set
-	err = handleResumeServerPassword(tmpDir, cfg, true, false, 9999)
+	err = HandleServerPassword(tmpDir, cfg, true, false, 9999)
 	require.NoError(t, err)
 	assert.Equal(t, 9999, cfg.Server.Port)
 }

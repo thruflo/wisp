@@ -12,7 +12,6 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
-	"github.com/thruflo/wisp/internal/auth"
 	"github.com/thruflo/wisp/internal/config"
 	"github.com/thruflo/wisp/internal/loop"
 	"github.com/thruflo/wisp/internal/server"
@@ -140,7 +139,7 @@ func runStart(cmd *cobra.Command, args []string) error {
 
 	// Handle server mode and password setup
 	if startServer || startSetPassword {
-		if err := handleServerPassword(cwd, cfg, startServer, startSetPassword, startServerPort); err != nil {
+		if err := HandleServerPassword(cwd, cfg, startServer, startSetPassword, startServerPort); err != nil {
 			return err
 		}
 	}
@@ -458,155 +457,16 @@ func SetupSprite(
 	env map[string]string,
 	localBasePath string,
 ) (string, error) {
-	// Parse repo org/name (needed for repo path)
-	parts := strings.Split(session.Repo, "/")
-	if len(parts) != 2 {
-		return "", fmt.Errorf("invalid repo format %q, expected org/repo", session.Repo)
-	}
-	org, repo := parts[0], parts[1]
-	// Clone to /var/local/wisp/repos/{org}/{repo}
-	repoPath := filepath.Join(sprite.ReposDir, org, repo)
-
-	// Check if sprite already exists
-	exists, err := client.Exists(ctx, session.SpriteName)
-	if err != nil {
-		return "", fmt.Errorf("failed to check sprite existence: %w", err)
-	}
-
-	if exists {
-		// Sprite exists - check if it's healthy by verifying repo path exists
-		fmt.Printf("Found existing Sprite %s, checking health...\n", session.SpriteName)
-
-		// Check if repo directory exists on sprite
-		_, _, exitCode, err := client.ExecuteOutput(ctx, session.SpriteName, "", nil, "test", "-d", repoPath)
-		if err == nil && exitCode == 0 {
-			// Repo exists - sprite is healthy, reuse it
-			fmt.Printf("Sprite is healthy, resuming on existing Sprite...\n")
-			return repoPath, nil
-		}
-
-		// Repo doesn't exist or check failed - sprite is broken, delete and recreate
-		fmt.Printf("Sprite appears broken, recreating...\n")
-		if err := client.Delete(ctx, session.SpriteName); err != nil {
-			return "", fmt.Errorf("failed to delete broken sprite: %w", err)
-		}
-	}
-
-	// Create Sprite
-	fmt.Printf("Creating Sprite %s...\n", session.SpriteName)
-	if err := client.Create(ctx, session.SpriteName, session.Checkpoint); err != nil {
-		return "", fmt.Errorf("failed to create sprite: %w", err)
-	}
-
-	// Create directory structure: /var/local/wisp/{session,templates,repos}
-	fmt.Printf("Creating directories...\n")
-	if err := syncMgr.EnsureDirectoriesOnSprite(ctx, session.SpriteName); err != nil {
-		return "", fmt.Errorf("failed to create directories: %w", err)
-	}
-
-	// Get GitHub token for cloning
-	githubToken := env["GITHUB_TOKEN"]
-	if githubToken == "" {
-		githubToken = os.Getenv("GITHUB_TOKEN")
-	}
-
-	// Setup git config
-	fmt.Printf("Setting up git config...\n")
-	if err := sprite.SetupGitConfig(ctx, client, session.SpriteName); err != nil {
-		return "", fmt.Errorf("failed to setup git config: %w", err)
-	}
-
-	// Clone primary repo (token embedded in URL for auth)
-	fmt.Printf("Cloning %s...\n", session.Repo)
-	if err := CloneRepo(ctx, client, session.SpriteName, session.Repo, repoPath, githubToken, ""); err != nil {
-		return "", fmt.Errorf("failed to clone repo: %w", err)
-	}
-
-	// Handle branch checkout based on session mode
-	if session.Continue {
-		// Continue mode: fetch and checkout existing branch
-		fmt.Printf("Fetching and checking out existing branch %s...\n", session.Branch)
-		if err := fetchAndCheckoutBranch(ctx, client, session.SpriteName, repoPath, session.Branch); err != nil {
-			return "", fmt.Errorf("failed to checkout existing branch: %w", err)
-		}
-	} else if session.Ref != "" {
-		// Ref mode: checkout base ref, then create new branch from it
-		fmt.Printf("Checking out base ref %s...\n", session.Ref)
-		if err := checkoutRef(ctx, client, session.SpriteName, repoPath, session.Ref); err != nil {
-			return "", fmt.Errorf("failed to checkout ref: %w", err)
-		}
-		fmt.Printf("Creating branch %s...\n", session.Branch)
-		if err := CreateBranch(ctx, client, session.SpriteName, repoPath, session.Branch); err != nil {
-			return "", fmt.Errorf("failed to create branch: %w", err)
-		}
-	} else {
-		// Default mode: create new branch from default branch
-		fmt.Printf("Creating branch %s...\n", session.Branch)
-		if err := CreateBranch(ctx, client, session.SpriteName, repoPath, session.Branch); err != nil {
-			return "", fmt.Errorf("failed to create branch: %w", err)
-		}
-	}
-
-	// Copy spec file from local to Sprite
-	fmt.Printf("Copying spec file %s...\n", session.Spec)
-	if err := CopySpecFile(ctx, client, session.SpriteName, localBasePath, session.Spec); err != nil {
-		return "", fmt.Errorf("failed to copy spec file: %w", err)
-	}
-
-	// Clone sibling repos (with optional ref checkout)
-	for _, sibling := range session.Siblings {
-		siblingParts := strings.Split(sibling.Repo, "/")
-		if len(siblingParts) != 2 {
-			return "", fmt.Errorf("invalid sibling repo format %q, expected org/repo", sibling.Repo)
-		}
-		siblingOrg, siblingRepo := siblingParts[0], siblingParts[1]
-		siblingPath := filepath.Join(sprite.ReposDir, siblingOrg, siblingRepo)
-
-		if sibling.Ref != "" {
-			fmt.Printf("Cloning sibling %s@%s...\n", sibling.Repo, sibling.Ref)
-		} else {
-			fmt.Printf("Cloning sibling %s...\n", sibling.Repo)
-		}
-		if err := CloneRepo(ctx, client, session.SpriteName, sibling.Repo, siblingPath, githubToken, sibling.Ref); err != nil {
-			return "", fmt.Errorf("failed to clone sibling %s: %w", sibling.Repo, err)
-		}
-	}
-
-	// Copy settings.json to ~/.claude/settings.json
-	fmt.Printf("Copying settings...\n")
-	if err := syncMgr.CopySettingsToSprite(ctx, session.SpriteName, settings); err != nil {
-		return "", fmt.Errorf("failed to copy settings: %w", err)
-	}
-
-	// Copy templates to /var/local/wisp/templates/
-	templateDir := filepath.Join(localBasePath, ".wisp", "templates", "default")
-	fmt.Printf("Copying templates...\n")
-	if err := syncMgr.CopyTemplatesToSprite(ctx, session.SpriteName, templateDir); err != nil {
-		return "", fmt.Errorf("failed to copy templates: %w", err)
-	}
-
-	// Inject environment variables by writing them to Sprite
-	fmt.Printf("Injecting environment...\n")
-	if err := InjectEnvVars(ctx, client, session.SpriteName, env); err != nil {
-		return "", fmt.Errorf("failed to inject env vars: %w", err)
-	}
-
-	// Copy Claude credentials for Claude Max authentication
-	fmt.Printf("Copying Claude credentials...\n")
-	if err := sprite.CopyClaudeCredentials(ctx, client, session.SpriteName); err != nil {
-		return "", fmt.Errorf("failed to copy Claude credentials: %w", err)
-	}
-
-	// Upload wisp-sprite binary
-	fmt.Printf("Uploading wisp-sprite binary...\n")
-	if err := UploadSpriteRunner(ctx, client, session.SpriteName, localBasePath); err != nil {
-		return "", fmt.Errorf("failed to upload wisp-sprite: %w", err)
-	}
-
-	// Start wisp-sprite (it will be started by the caller after task generation)
-	// Note: We don't start it here because tasks need to be generated first
-
-	return repoPath, nil
+	return SetupSpriteWithConfig(ctx, SpriteSetupConfig{
+		Mode:          SpriteSetupModeStart,
+		Client:        client,
+		SyncManager:   syncMgr,
+		Session:       session,
+		Settings:      settings,
+		Env:           env,
+		LocalBasePath: localBasePath,
+		TemplateName:  "default",
+	})
 }
 
 // CloneRepo clones a GitHub repository to the specified path on a Sprite.
@@ -773,51 +633,6 @@ func RunCreateTasksPrompt(ctx context.Context, client sprite.Client, session *co
 		createTasksPath, "RFC path: "+RemoteSpecPath, contextPath, 50)
 }
 
-// handleServerPassword handles password setup for the web server.
-// It prompts for a password if needed and saves the hash to config.
-func handleServerPassword(basePath string, cfg *config.Config, serverEnabled, setPassword bool, port int) error {
-	// Initialize server config if not present
-	if cfg.Server == nil {
-		cfg.Server = config.DefaultServerConfig()
-	}
-
-	// Update port from flag
-	cfg.Server.Port = port
-
-	// Check if we need to prompt for password
-	needsPassword := false
-
-	if setPassword {
-		// User explicitly wants to set/change password
-		needsPassword = true
-	} else if serverEnabled && cfg.Server.PasswordHash == "" {
-		// Server mode enabled but no password configured
-		needsPassword = true
-	}
-
-	if needsPassword {
-		password, err := auth.PromptAndConfirmPassword()
-		if err != nil {
-			return fmt.Errorf("password setup failed: %w", err)
-		}
-
-		hash, err := auth.HashPassword(password)
-		if err != nil {
-			return fmt.Errorf("failed to hash password: %w", err)
-		}
-
-		cfg.Server.PasswordHash = hash
-
-		// Save the updated config
-		if err := config.SaveConfig(basePath, cfg); err != nil {
-			return fmt.Errorf("failed to save config: %w", err)
-		}
-
-		fmt.Println("Password saved to config.")
-	}
-
-	return nil
-}
 
 // UploadSpriteRunner uploads the wisp-sprite binary to the Sprite.
 // The binary must have been built with `make build-sprite` prior to calling this.
