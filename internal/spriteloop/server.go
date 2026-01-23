@@ -380,9 +380,13 @@ func (s *Server) buildStateSnapshot() *StateSnapshot {
 			}
 		case stream.MessageTypeInputRequest:
 			input, err := event.InputRequestData()
-			if err == nil && !input.Responded {
+			if err == nil {
+				// In State Protocol, presence means it's pending
 				snapshot.LastInput = input
 			}
+		case stream.MessageTypeInputResponse:
+			// Response received - clear pending input
+			snapshot.LastInput = nil
 		}
 	}
 

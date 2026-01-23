@@ -73,18 +73,21 @@ func (cp *CommandProcessor) Run(ctx context.Context) error {
 				return ctx.Err()
 			}
 
-			// Only process command events
-			if event.Type != stream.MessageTypeCommand {
-				continue
-			}
-
 			// Update last processed sequence
 			cp.lastProcessedSeq = event.Seq
 
-			// Process the command
-			if err := cp.processCommandEvent(event); err != nil {
-				// Log error but continue processing
-				continue
+			// Process command or input_response events
+			switch event.Type {
+			case stream.MessageTypeCommand:
+				if err := cp.processCommandEvent(event); err != nil {
+					// Log error but continue processing
+					continue
+				}
+			case stream.MessageTypeInputResponse:
+				if err := cp.processInputResponseEvent(event); err != nil {
+					// Log error but continue processing
+					continue
+				}
 			}
 		}
 	}
@@ -109,12 +112,53 @@ func (cp *CommandProcessor) ProcessCommand(cmd *stream.Command) error {
 		return cp.handleKill(cmd)
 	case stream.CommandTypeBackground:
 		return cp.handleBackground(cmd)
-	case stream.CommandTypeInputResponse:
-		return cp.handleInputResponse(cmd)
 	default:
 		cp.publishAck(cmd.ID, fmt.Errorf("unknown command type: %s", cmd.Type))
 		return fmt.Errorf("unknown command type: %s", cmd.Type)
 	}
+}
+
+// processInputResponseEvent processes an input_response event from the stream.
+func (cp *CommandProcessor) processInputResponseEvent(event *stream.Event) error {
+	ir, err := event.InputResponseData()
+	if err != nil {
+		return fmt.Errorf("failed to unmarshal input response data: %w", err)
+	}
+
+	return cp.ProcessInputResponse(ir)
+}
+
+// ProcessInputResponse processes a single input response. This can be called
+// directly for responses received via HTTP rather than through stream subscription.
+func (cp *CommandProcessor) ProcessInputResponse(ir *stream.InputResponse) error {
+	// Check if this input request is pending
+	cp.mu.Lock()
+	isPending := cp.pendingInputs[ir.RequestID]
+	if isPending {
+		delete(cp.pendingInputs, ir.RequestID)
+	}
+	cp.mu.Unlock()
+
+	if !isPending {
+		// Input request not found - might have been answered already or timed out
+		// Still forward it - the loop will validate
+	}
+
+	// Try to send to inputCh (direct path for NEEDS_INPUT)
+	if cp.inputCh != nil {
+		select {
+		case cp.inputCh <- ir.Response:
+			cp.publishAck(ir.ID, nil)
+			return nil
+		default:
+			// Channel full
+			cp.publishAck(ir.ID, errors.New("input channel full"))
+			return errors.New("input channel full")
+		}
+	}
+
+	cp.publishAck(ir.ID, errors.New("no channel available for input response"))
+	return errors.New("no channel available for input response")
 }
 
 // handleKill processes a kill command to stop the loop.
@@ -151,53 +195,6 @@ func (cp *CommandProcessor) handleBackground(cmd *stream.Command) error {
 	return nil
 }
 
-// handleInputResponse processes an input response command.
-func (cp *CommandProcessor) handleInputResponse(cmd *stream.Command) error {
-	payload, err := cmd.InputResponsePayloadData()
-	if err != nil {
-		cp.publishAck(cmd.ID, fmt.Errorf("invalid input response payload: %w", err))
-		return fmt.Errorf("invalid input response payload: %w", err)
-	}
-
-	// Check if this input request is pending
-	cp.mu.Lock()
-	isPending := cp.pendingInputs[payload.RequestID]
-	if isPending {
-		delete(cp.pendingInputs, payload.RequestID)
-	}
-	cp.mu.Unlock()
-
-	if !isPending {
-		// Input request not found - might have been answered already or timed out
-		// Still forward it - the loop will validate
-	}
-
-	// Try to send to inputCh first (direct path for NEEDS_INPUT)
-	if cp.inputCh != nil {
-		select {
-		case cp.inputCh <- payload.Response:
-			cp.publishAck(cmd.ID, nil)
-			return nil
-		default:
-			// Channel full, fall through to command channel
-		}
-	}
-
-	// Fall back to command channel for the loop to handle
-	if cp.commandCh != nil {
-		select {
-		case cp.commandCh <- cmd:
-			// Ack is sent by the loop after processing
-			return nil
-		default:
-			cp.publishAck(cmd.ID, errors.New("command channel full"))
-			return errors.New("command channel full")
-		}
-	}
-
-	cp.publishAck(cmd.ID, errors.New("no channel available for input response"))
-	return errors.New("no channel available for input response")
-}
 
 // RegisterInputRequest registers an input request as pending.
 // This allows the CommandProcessor to track which input requests are valid.
@@ -227,7 +224,7 @@ func (cp *CommandProcessor) publishAck(commandID string, err error) {
 		ack = stream.NewSuccessAck(commandID)
 	}
 
-	event, eventErr := stream.NewEvent(stream.MessageTypeAck, ack)
+	event, eventErr := stream.NewAckEvent(ack)
 	if eventErr != nil {
 		return
 	}

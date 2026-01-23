@@ -691,14 +691,13 @@ func TestConvertTaskEventToTask(t *testing.T) {
 }
 
 func TestConvertInputRequestEventToInputRequest(t *testing.T) {
-	response := "yes"
+	// In State Protocol, stream.InputRequestEvent doesn't have Responded/Response
+	// These are server-side state tracking fields set by HandleInputResponse
 	ire := &stream.InputRequestEvent{
 		ID:        "input-1",
 		SessionID: "sess-1",
 		Iteration: 4,
 		Question:  "Continue?",
-		Responded: true,
-		Response:  &response,
 	}
 
 	ir := convertInputRequestEventToInputRequest(ire)
@@ -707,9 +706,9 @@ func TestConvertInputRequestEventToInputRequest(t *testing.T) {
 	assert.Equal(t, "sess-1", ir.SessionID)
 	assert.Equal(t, 4, ir.Iteration)
 	assert.Equal(t, "Continue?", ir.Question)
-	assert.True(t, ir.Responded)
-	require.NotNil(t, ir.Response)
-	assert.Equal(t, "yes", *ir.Response)
+	// Conversion always sets Responded=false, Response=nil (State Protocol pattern)
+	assert.False(t, ir.Responded)
+	assert.Nil(t, ir.Response)
 }
 
 func TestConvertClaudeEventToClaudeEvent(t *testing.T) {

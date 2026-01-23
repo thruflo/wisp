@@ -434,11 +434,7 @@ func (l *Loop) handleInputRequestEvent(ctx context.Context, event *stream.Event)
 		return Result{Reason: ExitReasonUnknown}
 	}
 
-	if data.Responded {
-		// Input was already provided, continue
-		return Result{Reason: ExitReasonUnknown}
-	}
-
+	// In State Protocol, presence of input_request means it's pending
 	// Broadcast to web clients
 	l.broadcastInputRequest(data)
 
@@ -579,13 +575,15 @@ func (l *Loop) broadcastInputRequest(data *stream.InputRequestEvent) {
 		return
 	}
 
+	// Convert stream.InputRequest to server.InputRequest
+	// In State Protocol, input_request events are always pending (not responded)
 	req := &server.InputRequest{
 		ID:        data.ID,
 		SessionID: data.SessionID,
 		Iteration: data.Iteration,
 		Question:  data.Question,
-		Responded: data.Responded,
-		Response:  data.Response,
+		Responded: false,
+		Response:  nil,
 	}
 
 	streams.BroadcastInputRequest(req)

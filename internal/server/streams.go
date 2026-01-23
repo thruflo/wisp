@@ -326,6 +326,14 @@ func (sm *StreamManager) handleRelayedEvent(event *stream.Event) {
 		inputReq := convertInputRequestEventToInputRequest(inputData)
 		_ = sm.BroadcastInputRequest(inputReq)
 
+	case stream.MessageTypeInputResponse:
+		responseData, err := event.InputResponseData()
+		if err != nil {
+			return
+		}
+		// Update the corresponding input request with the response
+		sm.HandleInputResponse(responseData.RequestID, responseData.Response)
+
 	case stream.MessageTypeAck:
 		// Ack events are not relayed to web clients directly
 		// They are handled by the command sender
@@ -368,15 +376,17 @@ func convertClaudeEventToClaudeEvent(ce *stream.ClaudeEvent) *ClaudeEvent {
 	}
 }
 
-// convertInputRequestEventToInputRequest converts a stream.InputRequestEvent to a server.InputRequest.
-func convertInputRequestEventToInputRequest(ire *stream.InputRequestEvent) *InputRequest {
+// convertInputRequestEventToInputRequest converts a stream.InputRequest to a server.InputRequest.
+// Note: With State Protocol, the Responded/Response fields are not populated here.
+// They are set separately when an input_response event is received.
+func convertInputRequestEventToInputRequest(ire *stream.InputRequest) *InputRequest {
 	return &InputRequest{
 		ID:        ire.ID,
 		SessionID: ire.SessionID,
 		Iteration: ire.Iteration,
 		Question:  ire.Question,
-		Responded: ire.Responded,
-		Response:  ire.Response,
+		Responded: false,
+		Response:  nil,
 	}
 }
 
@@ -477,6 +487,27 @@ func (sm *StreamManager) BroadcastInputRequest(req *InputRequest) error {
 	sm.mu.Unlock()
 
 	return sm.append(StreamMessage{
+		Type: MessageTypeInputRequest,
+		Data: req,
+	})
+}
+
+// HandleInputResponse updates an input request with the response.
+// This follows the State Protocol pattern where responses are separate events.
+func (sm *StreamManager) HandleInputResponse(requestID, response string) {
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+
+	req, ok := sm.inputRequests[requestID]
+	if !ok {
+		return
+	}
+
+	req.Responded = true
+	req.Response = &response
+
+	// Broadcast the updated input request so clients see the response
+	sm.appendUnlocked(StreamMessage{
 		Type: MessageTypeInputRequest,
 		Data: req,
 	})

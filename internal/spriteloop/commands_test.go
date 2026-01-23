@@ -108,7 +108,7 @@ func TestCommandProcessorBackgroundCommand(t *testing.T) {
 	}
 }
 
-func TestCommandProcessorInputResponseCommand(t *testing.T) {
+func TestCommandProcessorInputResponse(t *testing.T) {
 	tmpDir := t.TempDir()
 	fs, err := stream.NewFileStore(tmpDir + "/stream.ndjson")
 	if err != nil {
@@ -128,16 +128,17 @@ func TestCommandProcessorInputResponseCommand(t *testing.T) {
 	// Register a pending input request
 	cp.RegisterInputRequest("req-1")
 
-	// Create an input response command
-	cmd, err := stream.NewInputResponseCommand("cmd-3", "req-1", "user response")
-	if err != nil {
-		t.Fatalf("Failed to create input response command: %v", err)
+	// Create an input response (now a separate event type, not a command)
+	ir := &stream.InputResponse{
+		ID:        "response-1",
+		RequestID: "req-1",
+		Response:  "user response",
 	}
 
-	// Process the command
-	err = cp.ProcessCommand(cmd)
+	// Process the input response
+	err = cp.ProcessInputResponse(ir)
 	if err != nil {
-		t.Errorf("ProcessCommand returned error: %v", err)
+		t.Errorf("ProcessInputResponse returned error: %v", err)
 	}
 
 	// Check that response was sent to input channel
@@ -160,7 +161,7 @@ func TestCommandProcessorInputResponseCommand(t *testing.T) {
 	for _, e := range events {
 		if e.Type == stream.MessageTypeAck {
 			ack, _ := e.AckData()
-			if ack.CommandID == "cmd-3" && ack.Status == stream.AckStatusSuccess {
+			if ack.CommandID == "response-1" && ack.Status == stream.AckStatusSuccess {
 				foundAck = true
 				break
 			}
@@ -306,7 +307,7 @@ func TestCommandProcessorRunProcessesCommands(t *testing.T) {
 
 	// Write a command to the stream
 	cmd, _ := stream.NewKillCommand("stream-cmd-1", false)
-	cmdEvent, _ := stream.NewEvent(stream.MessageTypeCommand, cmd)
+	cmdEvent, _ := stream.NewCommandEvent(cmd)
 	if err := fs.Append(cmdEvent); err != nil {
 		t.Fatalf("Failed to append command: %v", err)
 	}
@@ -346,7 +347,7 @@ func TestCommandProcessorLastProcessedSeq(t *testing.T) {
 	}
 }
 
-func TestCommandProcessorInputResponseFallsBackToCommandChannel(t *testing.T) {
+func TestCommandProcessorInputResponseNoChannelReturnsError(t *testing.T) {
 	tmpDir := t.TempDir()
 	fs, err := stream.NewFileStore(tmpDir + "/stream.ndjson")
 	if err != nil {
@@ -355,36 +356,24 @@ func TestCommandProcessorInputResponseFallsBackToCommandChannel(t *testing.T) {
 	defer fs.Close()
 
 	cmdCh := make(chan *stream.Command, 10)
-	// No input channel - should fall back to command channel
+	// No input channel - should return error
 	cp := NewCommandProcessor(CommandProcessorOptions{
 		FileStore: fs,
 		CommandCh: cmdCh,
 		InputCh:   nil,
 	})
 
-	// Create an input response command
-	cmd, err := stream.NewInputResponseCommand("cmd-5", "req-2", "response")
-	if err != nil {
-		t.Fatalf("Failed to create input response command: %v", err)
+	// Create an input response (now a separate event type)
+	ir := &stream.InputResponse{
+		ID:        "response-1",
+		RequestID: "req-2",
+		Response:  "response",
 	}
 
-	// Process the command
-	err = cp.ProcessCommand(cmd)
-	if err != nil {
-		t.Errorf("ProcessCommand returned error: %v", err)
-	}
-
-	// Check that command was sent to command channel
-	select {
-	case received := <-cmdCh:
-		if received.ID != "cmd-5" {
-			t.Errorf("Expected command ID 'cmd-5', got %q", received.ID)
-		}
-		if received.Type != stream.CommandTypeInputResponse {
-			t.Errorf("Expected command type InputResponse, got %v", received.Type)
-		}
-	case <-time.After(100 * time.Millisecond):
-		t.Error("Expected command to be sent to command channel")
+	// Process the input response - should fail with no input channel
+	err = cp.ProcessInputResponse(ir)
+	if err == nil {
+		t.Error("Expected error when no input channel is available")
 	}
 }
 

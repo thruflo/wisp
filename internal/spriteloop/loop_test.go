@@ -832,7 +832,7 @@ func TestLoopNeedsInputWithBackgroundCommand(t *testing.T) {
 	}
 }
 
-func TestLoopNeedsInputWithInputResponseCommand(t *testing.T) {
+func TestLoopNeedsInputWithInputChannel(t *testing.T) {
 	tmpDir := t.TempDir()
 	sessionDir := filepath.Join(tmpDir, "session")
 	os.MkdirAll(sessionDir, 0755)
@@ -856,14 +856,10 @@ func TestLoopNeedsInputWithInputResponseCommand(t *testing.T) {
 		Question: "What is your answer?",
 	}
 
-	// The request ID format used by handleNeedsInput
-	expectedRequestID := "test-session-1-input"
-
-	// Send input response command in a goroutine
+	// Send input response via inputCh (new State Protocol pattern)
 	go func() {
 		time.Sleep(50 * time.Millisecond)
-		cmd, _ := stream.NewInputResponseCommand("cmd-input", expectedRequestID, "command response")
-		loop.commandCh <- cmd
+		loop.inputCh <- "user response"
 	}()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
@@ -871,7 +867,7 @@ func TestLoopNeedsInputWithInputResponseCommand(t *testing.T) {
 
 	result := loop.handleNeedsInput(ctx, st)
 
-	// Should return unknown (continue loop) after receiving input via command
+	// Should return unknown (continue loop) after receiving input
 	if result.Reason != ExitReasonUnknown {
 		t.Errorf("Expected ExitReasonUnknown, got %v", result.Reason)
 	}
@@ -983,14 +979,7 @@ func TestLoopHandleCommand(t *testing.T) {
 		}
 	})
 
-	t.Run("input response command", func(t *testing.T) {
-		cmd, _ := stream.NewInputResponseCommand("cmd-3", "req-1", "response")
-		err := loop.handleCommand(cmd)
-		// Input response is handled elsewhere, returns nil
-		if err != nil {
-			t.Errorf("Expected nil error, got %v", err)
-		}
-	})
+	// Note: input_response is now handled via inputCh, not as a command type
 
 	t.Run("unknown command", func(t *testing.T) {
 		cmd := &stream.Command{
@@ -1083,13 +1072,13 @@ func TestLoopAllTasksCompleteEmpty(t *testing.T) {
 	}
 }
 
-func TestLoopPublishEventNoFileStore(t *testing.T) {
+func TestLoopPublishSessionNoFileStore(t *testing.T) {
 	loop := &Loop{
 		fileStore: nil,
 	}
 
 	// Should not panic
-	loop.publishEvent(stream.MessageTypeSession, &stream.SessionEvent{})
+	loop.publishSession(&stream.Session{})
 }
 
 func TestLoopPublishClaudeEventInvalidJSON(t *testing.T) {

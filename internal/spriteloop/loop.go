@@ -473,14 +473,13 @@ func (l *Loop) recordHistory(st *state.State) error {
 func (l *Loop) handleNeedsInput(ctx context.Context, st *state.State) Result {
 	// Publish input request event
 	requestID := fmt.Sprintf("%s-%d-input", l.sessionID, l.iteration)
-	inputReq := &stream.InputRequestEvent{
+	inputReq := &stream.InputRequest{
 		ID:        requestID,
 		SessionID: l.sessionID,
 		Iteration: l.iteration,
 		Question:  st.Question,
-		Responded: false,
 	}
-	l.publishEvent(stream.MessageTypeInputRequest, inputReq)
+	l.publishInputRequest(inputReq)
 	l.publishSessionState(stream.SessionStatusNeedsInput)
 
 	// Wait for input response
@@ -498,36 +497,12 @@ func (l *Loop) handleNeedsInput(ctx context.Context, st *state.State) Result {
 					Error:      fmt.Errorf("failed to write response: %w", err),
 				}
 			}
-			// Publish that input was responded
-			inputReq.Responded = true
-			inputReq.Response = &response
-			l.publishEvent(stream.MessageTypeInputRequest, inputReq)
+			// Publish input response event (State Protocol pattern)
+			l.publishInputResponse(requestID, response)
 			return Result{Reason: ExitReasonUnknown}
 
 		case cmd := <-l.commandCh:
-			// Handle command - might be input_response
-			if cmd.Type == stream.CommandTypeInputResponse {
-				payload, err := cmd.InputResponsePayloadData()
-				if err == nil && payload.RequestID == requestID {
-					// Write response for the agent
-					if err := l.writeResponse(payload.Response); err != nil {
-						return Result{
-							Reason:     ExitReasonCrash,
-							Iterations: l.iteration,
-							Error:      fmt.Errorf("failed to write response: %w", err),
-						}
-					}
-					// Send ack
-					l.publishAck(cmd.ID, nil)
-					// Publish that input was responded
-					inputReq.Responded = true
-					inputReq.Response = &payload.Response
-					l.publishEvent(stream.MessageTypeInputRequest, inputReq)
-					return Result{Reason: ExitReasonUnknown}
-				}
-			}
-
-			// Handle other commands
+			// Handle commands (input responses now come via inputCh)
 			if err := l.handleCommand(cmd); err != nil {
 				if errors.Is(err, errUserKill) {
 					return Result{Reason: ExitReasonUserKill, Iterations: l.iteration}
@@ -571,9 +546,6 @@ func (l *Loop) handleCommand(cmd *stream.Command) error {
 	case stream.CommandTypeBackground:
 		l.publishAck(cmd.ID, nil)
 		return errUserBackground
-	case stream.CommandTypeInputResponse:
-		// This is handled in handleNeedsInput
-		return nil
 	default:
 		l.publishAck(cmd.ID, fmt.Errorf("unknown command type: %s", cmd.Type))
 		return nil
@@ -656,23 +628,10 @@ var (
 	errUserBackground = errors.New("user backgrounded session")
 )
 
-// publishEvent publishes an event to the FileStore.
-func (l *Loop) publishEvent(msgType stream.MessageType, data any) {
-	if l.fileStore == nil {
-		return
-	}
-
-	event, err := stream.NewEvent(msgType, data)
-	if err != nil {
-		return
-	}
-
-	l.fileStore.Append(event)
-}
 
 // publishSessionState publishes the current session state.
 func (l *Loop) publishSessionState(status stream.SessionStatus) {
-	session := &stream.SessionEvent{
+	session := &stream.Session{
 		ID:        l.sessionID,
 		Repo:      "", // Will be populated by caller if needed
 		Branch:    l.sessionID,
@@ -681,7 +640,19 @@ func (l *Loop) publishSessionState(status stream.SessionStatus) {
 		Iteration: l.iteration,
 		StartedAt: l.startTime,
 	}
-	l.publishEvent(stream.MessageTypeSession, session)
+	l.publishSession(session)
+}
+
+// publishSession publishes a session event to the FileStore.
+func (l *Loop) publishSession(session *stream.Session) {
+	if l.fileStore == nil {
+		return
+	}
+	event, err := stream.NewSessionEvent(session)
+	if err != nil {
+		return
+	}
+	l.fileStore.Append(event)
 }
 
 // publishTaskState publishes the current task states.
@@ -711,7 +682,7 @@ func (l *Loop) publishTaskState() {
 			}
 		}
 
-		task := &stream.TaskEvent{
+		task := &stream.Task{
 			ID:          fmt.Sprintf("%s-task-%d", l.sessionID, i),
 			SessionID:   l.sessionID,
 			Order:       i,
@@ -719,8 +690,20 @@ func (l *Loop) publishTaskState() {
 			Description: t.Description,
 			Status:      taskStatus,
 		}
-		l.publishEvent(stream.MessageTypeTask, task)
+		l.publishTask(task)
 	}
+}
+
+// publishTask publishes a task event to the FileStore.
+func (l *Loop) publishTask(task *stream.Task) {
+	if l.fileStore == nil {
+		return
+	}
+	event, err := stream.NewTaskEvent(task)
+	if err != nil {
+		return
+	}
+	l.fileStore.Append(event)
 }
 
 // publishClaudeEvent publishes a Claude output line to the stream.
@@ -737,7 +720,7 @@ func (l *Loop) publishClaudeEvent(line string) {
 	}
 
 	l.eventSeq++
-	event := &stream.ClaudeEvent{
+	ce := &stream.ClaudeEvent{
 		ID:        fmt.Sprintf("%s-%d-%d", l.sessionID, l.iteration, l.eventSeq),
 		SessionID: l.sessionID,
 		Iteration: l.iteration,
@@ -745,16 +728,58 @@ func (l *Loop) publishClaudeEvent(line string) {
 		Message:   sdkMessage,
 		Timestamp: time.Now(),
 	}
-	l.publishEvent(stream.MessageTypeClaudeEvent, event)
+
+	event, err := stream.NewClaudeEventEvent(ce)
+	if err != nil {
+		return
+	}
+	l.fileStore.Append(event)
 }
 
 // publishAck publishes a command acknowledgment.
 func (l *Loop) publishAck(commandID string, err error) {
+	if l.fileStore == nil {
+		return
+	}
 	var ack *stream.Ack
 	if err != nil {
 		ack = stream.NewErrorAck(commandID, err)
 	} else {
 		ack = stream.NewSuccessAck(commandID)
 	}
-	l.publishEvent(stream.MessageTypeAck, ack)
+	event, eventErr := stream.NewAckEvent(ack)
+	if eventErr != nil {
+		return
+	}
+	l.fileStore.Append(event)
+}
+
+// publishInputRequest publishes an input request event.
+func (l *Loop) publishInputRequest(ir *stream.InputRequest) {
+	if l.fileStore == nil {
+		return
+	}
+	event, err := stream.NewInputRequestEvent(ir)
+	if err != nil {
+		return
+	}
+	l.fileStore.Append(event)
+}
+
+// publishInputResponse publishes an input response event.
+// This follows the State Protocol pattern for durable mutations.
+func (l *Loop) publishInputResponse(requestID, response string) {
+	if l.fileStore == nil {
+		return
+	}
+	ir := &stream.InputResponse{
+		ID:        fmt.Sprintf("%s-response", requestID),
+		RequestID: requestID,
+		Response:  response,
+	}
+	event, err := stream.NewInputResponseEvent(ir)
+	if err != nil {
+		return
+	}
+	l.fileStore.Append(event)
 }

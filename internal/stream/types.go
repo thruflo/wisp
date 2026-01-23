@@ -1,5 +1,9 @@
 // Package stream provides shared types and utilities for durable stream
 // communication between wisp-sprite (on the Sprite VM) and clients (TUI/web).
+//
+// This package implements types compatible with the durable-streams State Protocol
+// (https://github.com/durable-streams/durable-streams). Events follow the State
+// Protocol schema with type, key, value, and headers fields.
 package stream
 
 import (
@@ -8,20 +12,23 @@ import (
 	"time"
 )
 
-// MessageType identifies the type of message in the stream.
+// MessageType identifies the type/collection of an entity in the stream.
+// This corresponds to the "type" field in the State Protocol.
 type MessageType string
 
 const (
-	// Sprite → Client message types
+	// Sprite → Client entity types (collections)
 
-	// MessageTypeSession is a session state update.
+	// MessageTypeSession is a session state entity.
 	MessageTypeSession MessageType = "session"
-	// MessageTypeTask is a task state update.
+	// MessageTypeTask is a task state entity.
 	MessageTypeTask MessageType = "task"
 	// MessageTypeClaudeEvent is a Claude output event.
 	MessageTypeClaudeEvent MessageType = "claude_event"
 	// MessageTypeInputRequest is a request for user input.
 	MessageTypeInputRequest MessageType = "input_request"
+	// MessageTypeInputResponse is a response to an input request.
+	MessageTypeInputResponse MessageType = "input_response"
 	// MessageTypeAck is a command acknowledgment.
 	MessageTypeAck MessageType = "ack"
 
@@ -31,54 +38,87 @@ const (
 	MessageTypeCommand MessageType = "command"
 )
 
-// CommandType identifies the type of command sent from client to Sprite.
-type CommandType string
+// Operation indicates the CRUD operation for a State Protocol event.
+type Operation string
 
 const (
-	// CommandTypeKill stops the loop and optionally deletes the Sprite.
-	CommandTypeKill CommandType = "kill"
-	// CommandTypeBackground pauses the loop but keeps the Sprite alive.
-	CommandTypeBackground CommandType = "background"
-	// CommandTypeInputResponse provides user input in response to an InputRequest.
-	CommandTypeInputResponse CommandType = "input_response"
+	// OperationInsert indicates a new entity was created.
+	OperationInsert Operation = "insert"
+	// OperationUpdate indicates an existing entity was modified.
+	OperationUpdate Operation = "update"
+	// OperationDelete indicates an entity was removed.
+	OperationDelete Operation = "delete"
 )
 
-// Event represents a message in the durable stream.
+// Headers contains metadata for a State Protocol event.
+type Headers struct {
+	// Operation indicates the CRUD operation (insert, update, delete).
+	Operation Operation `json:"operation"`
+	// TxID is an optional transaction identifier for grouping related changes.
+	TxID string `json:"txid,omitempty"`
+	// Timestamp is when the event was created (ISO 8601 format).
+	Timestamp time.Time `json:"timestamp"`
+}
+
+// Event represents a message in the durable stream following the State Protocol.
 // Events are serialized to JSON for storage and transmission.
+//
+// State Protocol format:
+//
+//	{
+//	  "type": "session",
+//	  "key": "session:abc123",
+//	  "value": { ... entity data ... },
+//	  "headers": { "operation": "insert", "timestamp": "..." }
+//	}
 type Event struct {
 	// Seq is the sequence number assigned by the FileStore.
+	// This is a wisp-specific extension for catch-up/resume support.
 	// Zero for events not yet persisted.
 	Seq uint64 `json:"seq,omitempty"`
 
-	// Type identifies what kind of event this is.
+	// Type identifies the entity collection (e.g., "session", "task").
 	Type MessageType `json:"type"`
 
-	// Timestamp is when the event was created.
-	Timestamp time.Time `json:"timestamp"`
+	// Key is the unique identifier for the entity (e.g., "session:abc123").
+	Key string `json:"key"`
 
-	// Data contains the type-specific payload.
+	// Value contains the entity data.
 	// Use the typed accessor methods to get the concrete type.
-	Data json.RawMessage `json:"data"`
+	Value json.RawMessage `json:"value"`
+
+	// Headers contains operation metadata (operation, txid, timestamp).
+	Headers Headers `json:"headers"`
 }
 
-// NewEvent creates a new Event with the given type and data.
-func NewEvent(msgType MessageType, data any) (*Event, error) {
-	dataBytes, err := json.Marshal(data)
+// NewEvent creates a new Event with the given type, key, and value.
+// The operation defaults to "insert" for new events.
+func NewEvent(msgType MessageType, key string, value any) (*Event, error) {
+	return NewEventWithOp(msgType, key, value, OperationInsert)
+}
+
+// NewEventWithOp creates a new Event with a specific operation.
+func NewEventWithOp(msgType MessageType, key string, value any, op Operation) (*Event, error) {
+	valueBytes, err := json.Marshal(value)
 	if err != nil {
-		return nil, fmt.Errorf("failed to marshal event data: %w", err)
+		return nil, fmt.Errorf("failed to marshal event value: %w", err)
 	}
 
 	return &Event{
-		Type:      msgType,
-		Timestamp: time.Now().UTC(),
-		Data:      dataBytes,
+		Type:  msgType,
+		Key:   key,
+		Value: valueBytes,
+		Headers: Headers{
+			Operation: op,
+			Timestamp: time.Now().UTC(),
+		},
 	}, nil
 }
 
 // MustNewEvent creates a new Event, panicking on error.
-// Use only when the data is known to be serializable.
-func MustNewEvent(msgType MessageType, data any) *Event {
-	e, err := NewEvent(msgType, data)
+// Use only when the value is known to be serializable.
+func MustNewEvent(msgType MessageType, key string, value any) *Event {
+	e, err := NewEvent(msgType, key, value)
 	if err != nil {
 		panic(err)
 	}
@@ -100,24 +140,24 @@ func UnmarshalEvent(data []byte) (*Event, error) {
 }
 
 // SessionData returns the session data if this is a session event.
-func (e *Event) SessionData() (*SessionEvent, error) {
+func (e *Event) SessionData() (*Session, error) {
 	if e.Type != MessageTypeSession {
 		return nil, fmt.Errorf("event is not a session event: %s", e.Type)
 	}
-	var data SessionEvent
-	if err := json.Unmarshal(e.Data, &data); err != nil {
+	var data Session
+	if err := json.Unmarshal(e.Value, &data); err != nil {
 		return nil, fmt.Errorf("failed to unmarshal session data: %w", err)
 	}
 	return &data, nil
 }
 
 // TaskData returns the task data if this is a task event.
-func (e *Event) TaskData() (*TaskEvent, error) {
+func (e *Event) TaskData() (*Task, error) {
 	if e.Type != MessageTypeTask {
 		return nil, fmt.Errorf("event is not a task event: %s", e.Type)
 	}
-	var data TaskEvent
-	if err := json.Unmarshal(e.Data, &data); err != nil {
+	var data Task
+	if err := json.Unmarshal(e.Value, &data); err != nil {
 		return nil, fmt.Errorf("failed to unmarshal task data: %w", err)
 	}
 	return &data, nil
@@ -129,20 +169,32 @@ func (e *Event) ClaudeEventData() (*ClaudeEvent, error) {
 		return nil, fmt.Errorf("event is not a claude_event: %s", e.Type)
 	}
 	var data ClaudeEvent
-	if err := json.Unmarshal(e.Data, &data); err != nil {
+	if err := json.Unmarshal(e.Value, &data); err != nil {
 		return nil, fmt.Errorf("failed to unmarshal claude_event data: %w", err)
 	}
 	return &data, nil
 }
 
 // InputRequestData returns the input request data if this is an input_request.
-func (e *Event) InputRequestData() (*InputRequestEvent, error) {
+func (e *Event) InputRequestData() (*InputRequest, error) {
 	if e.Type != MessageTypeInputRequest {
 		return nil, fmt.Errorf("event is not an input_request: %s", e.Type)
 	}
-	var data InputRequestEvent
-	if err := json.Unmarshal(e.Data, &data); err != nil {
+	var data InputRequest
+	if err := json.Unmarshal(e.Value, &data); err != nil {
 		return nil, fmt.Errorf("failed to unmarshal input_request data: %w", err)
+	}
+	return &data, nil
+}
+
+// InputResponseData returns the input response data if this is an input_response.
+func (e *Event) InputResponseData() (*InputResponse, error) {
+	if e.Type != MessageTypeInputResponse {
+		return nil, fmt.Errorf("event is not an input_response: %s", e.Type)
+	}
+	var data InputResponse
+	if err := json.Unmarshal(e.Value, &data); err != nil {
+		return nil, fmt.Errorf("failed to unmarshal input_response data: %w", err)
 	}
 	return &data, nil
 }
@@ -153,7 +205,7 @@ func (e *Event) CommandData() (*Command, error) {
 		return nil, fmt.Errorf("event is not a command: %s", e.Type)
 	}
 	var data Command
-	if err := json.Unmarshal(e.Data, &data); err != nil {
+	if err := json.Unmarshal(e.Value, &data); err != nil {
 		return nil, fmt.Errorf("failed to unmarshal command data: %w", err)
 	}
 	return &data, nil
@@ -165,7 +217,7 @@ func (e *Event) AckData() (*Ack, error) {
 		return nil, fmt.Errorf("event is not an ack: %s", e.Type)
 	}
 	var data Ack
-	if err := json.Unmarshal(e.Data, &data); err != nil {
+	if err := json.Unmarshal(e.Value, &data); err != nil {
 		return nil, fmt.Errorf("failed to unmarshal ack data: %w", err)
 	}
 	return &data, nil
@@ -182,8 +234,9 @@ const (
 	SessionStatusPaused     SessionStatus = "paused"
 )
 
-// SessionEvent contains session state information.
-type SessionEvent struct {
+// Session contains session state information.
+// This is the value type for "session" events in the State Protocol.
+type Session struct {
 	ID        string        `json:"id"`
 	Repo      string        `json:"repo"`
 	Branch    string        `json:"branch"`
@@ -202,8 +255,9 @@ const (
 	TaskStatusCompleted  TaskStatus = "completed"
 )
 
-// TaskEvent contains task state information.
-type TaskEvent struct {
+// Task contains task state information.
+// This is the value type for "task" events in the State Protocol.
+type Task struct {
 	ID          string     `json:"id"`
 	SessionID   string     `json:"session_id"`
 	Order       int        `json:"order"`
@@ -213,6 +267,7 @@ type TaskEvent struct {
 }
 
 // ClaudeEvent contains Claude output event data.
+// This is the value type for "claude_event" events in the State Protocol.
 type ClaudeEvent struct {
 	ID        string `json:"id"`
 	SessionID string `json:"session_id"`
@@ -224,17 +279,37 @@ type ClaudeEvent struct {
 	Timestamp time.Time `json:"timestamp"`
 }
 
-// InputRequestEvent contains a request for user input.
-type InputRequestEvent struct {
-	ID        string  `json:"id"`
-	SessionID string  `json:"session_id"`
-	Iteration int     `json:"iteration"`
-	Question  string  `json:"question"`
-	Responded bool    `json:"responded"`
-	Response  *string `json:"response,omitempty"`
+// InputRequest contains a request for user input.
+// This is the value type for "input_request" events in the State Protocol.
+type InputRequest struct {
+	ID        string `json:"id"`
+	SessionID string `json:"session_id"`
+	Iteration int    `json:"iteration"`
+	Question  string `json:"question"`
 }
 
+// InputResponse contains a response to an input request.
+// This is the value type for "input_response" events in the State Protocol.
+// InputResponse is stored as a durable event, enabling transaction confirmation
+// via txid and awaitTxId() per the State Protocol mutation pattern.
+type InputResponse struct {
+	ID        string `json:"id"`
+	RequestID string `json:"request_id"`
+	Response  string `json:"response"`
+}
+
+// CommandType identifies the type of command sent from client to Sprite.
+type CommandType string
+
+const (
+	// CommandTypeKill stops the loop and optionally deletes the Sprite.
+	CommandTypeKill CommandType = "kill"
+	// CommandTypeBackground pauses the loop but keeps the Sprite alive.
+	CommandTypeBackground CommandType = "background"
+)
+
 // Command represents a command from client to Sprite.
+// This is the value type for "command" events in the State Protocol.
 type Command struct {
 	// ID is a unique identifier for this command, used for acknowledgment.
 	ID string `json:"id"`
@@ -243,39 +318,14 @@ type Command struct {
 	Type CommandType `json:"type"`
 
 	// Payload contains type-specific command data.
-	// For input_response, this contains the InputResponsePayload.
 	// For kill, this may contain a KillPayload with options.
 	Payload json.RawMessage `json:"payload,omitempty"`
-}
-
-// InputResponsePayload is the payload for input_response commands.
-type InputResponsePayload struct {
-	// RequestID is the ID of the InputRequestEvent this responds to.
-	RequestID string `json:"request_id"`
-	// Response is the user's response text.
-	Response string `json:"response"`
 }
 
 // KillPayload is the payload for kill commands.
 type KillPayload struct {
 	// DeleteSprite indicates whether to delete the Sprite after stopping.
 	DeleteSprite bool `json:"delete_sprite"`
-}
-
-// NewInputResponseCommand creates a new input_response command.
-func NewInputResponseCommand(id, requestID, response string) (*Command, error) {
-	payload, err := json.Marshal(InputResponsePayload{
-		RequestID: requestID,
-		Response:  response,
-	})
-	if err != nil {
-		return nil, fmt.Errorf("failed to marshal input response payload: %w", err)
-	}
-	return &Command{
-		ID:      id,
-		Type:    CommandTypeInputResponse,
-		Payload: payload,
-	}, nil
 }
 
 // NewKillCommand creates a new kill command.
@@ -299,18 +349,6 @@ func NewBackgroundCommand(id string) *Command {
 		ID:   id,
 		Type: CommandTypeBackground,
 	}
-}
-
-// InputResponsePayloadData returns the input response payload.
-func (c *Command) InputResponsePayloadData() (*InputResponsePayload, error) {
-	if c.Type != CommandTypeInputResponse {
-		return nil, fmt.Errorf("command is not input_response: %s", c.Type)
-	}
-	var payload InputResponsePayload
-	if err := json.Unmarshal(c.Payload, &payload); err != nil {
-		return nil, fmt.Errorf("failed to unmarshal input response payload: %w", err)
-	}
-	return &payload, nil
 }
 
 // KillPayloadData returns the kill payload.
@@ -338,6 +376,7 @@ const (
 )
 
 // Ack represents an acknowledgment of a command.
+// This is the value type for "ack" events in the State Protocol.
 type Ack struct {
 	// CommandID is the ID of the command being acknowledged.
 	CommandID string `json:"command_id"`
@@ -363,3 +402,65 @@ func NewErrorAck(commandID string, err error) *Ack {
 		Error:     err.Error(),
 	}
 }
+
+// Helper functions for creating events with proper keys
+
+// NewSessionEvent creates a session event with the proper key format.
+func NewSessionEvent(session *Session) (*Event, error) {
+	return NewEvent(MessageTypeSession, "session:"+session.ID, session)
+}
+
+// NewSessionEventWithOp creates a session event with a specific operation.
+func NewSessionEventWithOp(session *Session, op Operation) (*Event, error) {
+	return NewEventWithOp(MessageTypeSession, "session:"+session.ID, session, op)
+}
+
+// NewTaskEvent creates a task event with the proper key format.
+func NewTaskEvent(task *Task) (*Event, error) {
+	return NewEvent(MessageTypeTask, "task:"+task.ID, task)
+}
+
+// NewTaskEventWithOp creates a task event with a specific operation.
+func NewTaskEventWithOp(task *Task, op Operation) (*Event, error) {
+	return NewEventWithOp(MessageTypeTask, "task:"+task.ID, task, op)
+}
+
+// NewClaudeEventEvent creates a claude_event event with the proper key format.
+func NewClaudeEventEvent(ce *ClaudeEvent) (*Event, error) {
+	return NewEvent(MessageTypeClaudeEvent, "claude_event:"+ce.ID, ce)
+}
+
+// NewInputRequestEvent creates an input_request event with the proper key format.
+func NewInputRequestEvent(ir *InputRequest) (*Event, error) {
+	return NewEvent(MessageTypeInputRequest, "input_request:"+ir.ID, ir)
+}
+
+// NewInputResponseEvent creates an input_response event with the proper key format.
+func NewInputResponseEvent(ir *InputResponse) (*Event, error) {
+	return NewEvent(MessageTypeInputResponse, "input_response:"+ir.ID, ir)
+}
+
+// NewCommandEvent creates a command event with the proper key format.
+func NewCommandEvent(cmd *Command) (*Event, error) {
+	return NewEvent(MessageTypeCommand, "command:"+cmd.ID, cmd)
+}
+
+// NewAckEvent creates an ack event with the proper key format.
+func NewAckEvent(ack *Ack) (*Event, error) {
+	return NewEvent(MessageTypeAck, "ack:"+ack.CommandID, ack)
+}
+
+// Legacy compatibility aliases
+// These are deprecated and will be removed in a future version.
+
+// SessionEvent is an alias for Session for backward compatibility.
+// Deprecated: Use Session instead.
+type SessionEvent = Session
+
+// TaskEvent is an alias for Task for backward compatibility.
+// Deprecated: Use Task instead.
+type TaskEvent = Task
+
+// InputRequestEvent is an alias for InputRequest for backward compatibility.
+// Deprecated: Use InputRequest instead.
+type InputRequestEvent = InputRequest

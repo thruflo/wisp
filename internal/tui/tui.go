@@ -450,6 +450,8 @@ func (t *TUI) HandleStreamEvent(event *stream.Event) {
 		t.handleClaudeEvent(event)
 	case stream.MessageTypeInputRequest:
 		t.handleInputRequestEvent(event)
+	case stream.MessageTypeInputResponse:
+		t.handleInputResponseEvent(event)
 	}
 }
 
@@ -514,18 +516,6 @@ func (t *TUI) handleInputRequestEvent(event *stream.Event) {
 		return
 	}
 
-	// If already responded, update state and return to summary
-	if data.Responded {
-		t.mu.Lock()
-		t.inputRequestID = ""
-		if t.view == ViewInput {
-			t.view = ViewSummary
-		}
-		t.mu.Unlock()
-		t.Update()
-		return
-	}
-
 	// Show input view for pending input request
 	t.mu.Lock()
 	t.inputRequestID = data.ID
@@ -533,6 +523,24 @@ func (t *TUI) handleInputRequestEvent(event *stream.Event) {
 
 	t.ShowInput(data.Question)
 	t.Bell()
+}
+
+// handleInputResponseEvent handles input response events.
+// This clears the input view when a response has been received.
+func (t *TUI) handleInputResponseEvent(event *stream.Event) {
+	_, err := event.InputResponseData()
+	if err != nil {
+		return
+	}
+
+	// Response received, return to summary view
+	t.mu.Lock()
+	t.inputRequestID = ""
+	if t.view == ViewInput {
+		t.view = ViewSummary
+	}
+	t.mu.Unlock()
+	t.Update()
 }
 
 // formatClaudeEventForDisplay extracts a displayable string from a Claude event.
@@ -601,7 +609,8 @@ func (t *TUI) UpdateFromSnapshot(snapshot *stream.StateSnapshot) {
 	t.state.CompletedTasks = completed
 
 	// Handle pending input request
-	if snapshot.InputRequest != nil && !snapshot.InputRequest.Responded {
+	// In State Protocol, presence in snapshot means it's pending (not yet responded)
+	if snapshot.InputRequest != nil {
 		t.inputRequestID = snapshot.InputRequest.ID
 		t.state.Question = snapshot.InputRequest.Question
 		// Don't automatically switch to input view - let caller decide

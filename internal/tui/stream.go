@@ -43,7 +43,8 @@ func (r *StreamRunner) Run(ctx context.Context) error {
 	eventCh, errCh := r.client.Subscribe(ctx, snapshot.LastSeq+1)
 
 	// Show input view if there's a pending input request
-	if snapshot.InputRequest != nil && !snapshot.InputRequest.Responded {
+	// In State Protocol, presence in snapshot means it's pending (not yet responded)
+	if snapshot.InputRequest != nil {
 		r.tui.ShowInput(snapshot.InputRequest.Question)
 		r.tui.Bell()
 	}

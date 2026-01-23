@@ -43,7 +43,8 @@ func TestTUI_HandleStreamEvent_Session(t *testing.T) {
 		Iteration: 5,
 	}
 
-	event := stream.MustNewEvent(stream.MessageTypeSession, sessionData)
+	event, err := stream.NewSessionEvent(sessionData)
+	require.NoError(t, err)
 
 	tui.HandleStreamEvent(event)
 
@@ -69,7 +70,8 @@ func TestTUI_HandleStreamEvent_Task(t *testing.T) {
 			Description: "Task description",
 			Status:      stream.TaskStatusPending,
 		}
-		event := stream.MustNewEvent(stream.MessageTypeTask, taskData)
+		event, err := stream.NewTaskEvent(taskData)
+		require.NoError(t, err)
 		tui.HandleStreamEvent(event)
 	}
 
@@ -92,7 +94,8 @@ func TestTUI_HandleStreamEvent_Claude(t *testing.T) {
 		Timestamp: time.Now(),
 	}
 
-	event := stream.MustNewEvent(stream.MessageTypeClaudeEvent, claudeData)
+	event, err := stream.NewClaudeEventEvent(claudeData)
+	require.NoError(t, err)
 
 	tui.HandleStreamEvent(event)
 
@@ -113,10 +116,10 @@ func TestTUI_HandleStreamEvent_InputRequest(t *testing.T) {
 		SessionID: "test-session",
 		Iteration: 1,
 		Question:  "What is your name?",
-		Responded: false,
 	}
 
-	event := stream.MustNewEvent(stream.MessageTypeInputRequest, inputData)
+	event, err := stream.NewInputRequestEvent(inputData)
+	require.NoError(t, err)
 
 	tui.HandleStreamEvent(event)
 
@@ -127,7 +130,7 @@ func TestTUI_HandleStreamEvent_InputRequest(t *testing.T) {
 	assert.Equal(t, "What is your name?", state.Question)
 }
 
-func TestTUI_HandleStreamEvent_InputRequest_Responded(t *testing.T) {
+func TestTUI_HandleStreamEvent_InputResponse(t *testing.T) {
 	t.Parallel()
 
 	buf := &bytes.Buffer{}
@@ -138,18 +141,15 @@ func TestTUI_HandleStreamEvent_InputRequest_Responded(t *testing.T) {
 	tui.SetInputRequestID("input-1")
 	assert.Equal(t, ViewInput, tui.GetView())
 
-	// Then receive a responded event
-	response := "Answer"
-	inputData := &stream.InputRequestEvent{
-		ID:        "input-1",
-		SessionID: "test-session",
-		Iteration: 1,
-		Question:  "Question?",
-		Responded: true,
-		Response:  &response,
+	// Then receive an input_response event (separate event type in State Protocol)
+	responseData := &stream.InputResponse{
+		ID:        "response-1",
+		RequestID: "input-1",
+		Response:  "Answer",
 	}
 
-	event := stream.MustNewEvent(stream.MessageTypeInputRequest, inputData)
+	event, err := stream.NewInputResponseEvent(responseData)
+	require.NoError(t, err)
 
 	tui.HandleStreamEvent(event)
 
@@ -198,6 +198,7 @@ func TestTUI_UpdateFromSnapshot_WithPendingInput(t *testing.T) {
 	buf := &bytes.Buffer{}
 	tui := NewTUI(buf)
 
+	// In State Protocol, presence in snapshot means it's pending (not yet responded)
 	snapshot := &stream.StateSnapshot{
 		Session: &stream.SessionEvent{
 			ID:     "test-session",
@@ -205,9 +206,8 @@ func TestTUI_UpdateFromSnapshot_WithPendingInput(t *testing.T) {
 			Status: stream.SessionStatusNeedsInput,
 		},
 		InputRequest: &stream.InputRequestEvent{
-			ID:        "input-123",
-			Question:  "What database?",
-			Responded: false,
+			ID:       "input-123",
+			Question: "What database?",
 		},
 		LastSeq: 10,
 	}

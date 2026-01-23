@@ -133,9 +133,9 @@ func TestStreamClientSubscribe(t *testing.T) {
 		t.Parallel()
 
 		events := []*Event{
-			MustNewEvent(MessageTypeSession, SessionEvent{ID: "sess-1"}),
-			MustNewEvent(MessageTypeTask, TaskEvent{ID: "task-1"}),
-			MustNewEvent(MessageTypeClaudeEvent, ClaudeEvent{ID: "claude-1"}),
+			MustNewEvent(MessageTypeSession, "session:sess-1", Session{ID: "sess-1"}),
+			MustNewEvent(MessageTypeTask, "task:task-1", Task{ID: "task-1"}),
+			MustNewEvent(MessageTypeClaudeEvent, "claude_event:claude-1", ClaudeEvent{ID: "claude-1"}),
 		}
 		// Assign sequence numbers
 		for i, e := range events {
@@ -202,7 +202,7 @@ func TestStreamClientSubscribe(t *testing.T) {
 	t.Run("updates lastSeq as events are received", func(t *testing.T) {
 		t.Parallel()
 
-		event := MustNewEvent(MessageTypeSession, SessionEvent{ID: "sess-1"})
+		event := MustNewEvent(MessageTypeSession, "session:sess-1", Session{ID: "sess-1"})
 		event.Seq = 42
 
 		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -245,7 +245,7 @@ func TestStreamClientSubscribe(t *testing.T) {
 				w.Header().Set("Content-Type", "text/event-stream")
 				w.WriteHeader(http.StatusOK)
 				// Send one event and close
-				event := MustNewEvent(MessageTypeSession, SessionEvent{ID: "sess-1"})
+				event := MustNewEvent(MessageTypeSession, "session:sess-1", Session{ID: "sess-1"})
 				event.Seq = 10
 				data, _ := event.Marshal()
 				fmt.Fprintf(w, "data: %s\n\n", string(data))
@@ -333,7 +333,7 @@ func TestStreamClientSubscribe(t *testing.T) {
 				w.Header().Set("Content-Type", "text/event-stream")
 				w.WriteHeader(http.StatusOK)
 
-				event := MustNewEvent(MessageTypeSession, SessionEvent{ID: "sess-1"})
+				event := MustNewEvent(MessageTypeSession, "session:sess-1", Session{ID: "sess-1"})
 				event.Seq = 1
 				data, _ := event.Marshal()
 				fmt.Fprintf(w, "data: %s\n\n", string(data))
@@ -550,23 +550,29 @@ func TestStreamClientSendInputResponse(t *testing.T) {
 		t.Parallel()
 
 		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			// Input response is sent to /input endpoint, not /command
+			assert.Equal(t, "/input", r.URL.Path)
+			assert.Equal(t, "POST", r.Method)
+
 			var event Event
 			json.NewDecoder(r.Body).Decode(&event)
-			cmd, _ := event.CommandData()
-			payload, _ := cmd.InputResponsePayloadData()
 
-			assert.Equal(t, CommandTypeInputResponse, cmd.Type)
-			assert.Equal(t, "input-1", cmd.ID)
-			assert.Equal(t, "req-123", payload.RequestID)
-			assert.Equal(t, "user's response", payload.Response)
+			// Input response is now its own event type, not a command
+			assert.Equal(t, MessageTypeInputResponse, event.Type)
+
+			ir, err := event.InputResponseData()
+			require.NoError(t, err)
+			assert.Equal(t, "resp-1", ir.ID)
+			assert.Equal(t, "req-123", ir.RequestID)
+			assert.Equal(t, "user's response", ir.Response)
 
 			w.WriteHeader(http.StatusOK)
-			json.NewEncoder(w).Encode(NewSuccessAck(cmd.ID))
+			json.NewEncoder(w).Encode(NewSuccessAck(ir.ID))
 		}))
 		defer server.Close()
 
 		client := NewStreamClient(server.URL)
-		ack, err := client.SendInputResponse(context.Background(), "input-1", "req-123", "user's response")
+		ack, err := client.SendInputResponse(context.Background(), "resp-1", "req-123", "user's response")
 		require.NoError(t, err)
 		assert.Equal(t, AckStatusSuccess, ack.Status)
 	})
@@ -686,7 +692,7 @@ func TestSSEParsing(t *testing.T) {
 	t.Run("handles data without space after colon", func(t *testing.T) {
 		t.Parallel()
 
-		event := MustNewEvent(MessageTypeSession, SessionEvent{ID: "sess-1"})
+		event := MustNewEvent(MessageTypeSession, "session:sess-1", Session{ID: "sess-1"})
 		event.Seq = 1
 
 		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -716,7 +722,7 @@ func TestSSEParsing(t *testing.T) {
 	t.Run("skips malformed events", func(t *testing.T) {
 		t.Parallel()
 
-		validEvent := MustNewEvent(MessageTypeSession, SessionEvent{ID: "sess-1"})
+		validEvent := MustNewEvent(MessageTypeSession, "session:sess-1", Session{ID: "sess-1"})
 		validEvent.Seq = 1
 
 		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -754,7 +760,7 @@ func TestSSEParsing(t *testing.T) {
 	t.Run("ignores other SSE fields", func(t *testing.T) {
 		t.Parallel()
 
-		event := MustNewEvent(MessageTypeSession, SessionEvent{ID: "sess-1"})
+		event := MustNewEvent(MessageTypeSession, "session:sess-1", Session{ID: "sess-1"})
 		event.Seq = 1
 
 		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

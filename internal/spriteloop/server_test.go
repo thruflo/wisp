@@ -272,7 +272,7 @@ func TestHandleState(t *testing.T) {
 		defer fs.Close()
 
 		// Add session event
-		sessionEvent, _ := stream.NewEvent(stream.MessageTypeSession, &stream.SessionEvent{
+		sessionEvent, _ := stream.NewSessionEvent(&stream.SessionEvent{
 			ID:        "test-session",
 			Branch:    "feature-branch",
 			Status:    stream.SessionStatusRunning,
@@ -281,7 +281,7 @@ func TestHandleState(t *testing.T) {
 		fs.Append(sessionEvent)
 
 		// Add task events
-		task1Event, _ := stream.NewEvent(stream.MessageTypeTask, &stream.TaskEvent{
+		task1Event, _ := stream.NewTaskEvent(&stream.TaskEvent{
 			ID:          "task-0",
 			SessionID:   "test-session",
 			Order:       0,
@@ -291,7 +291,7 @@ func TestHandleState(t *testing.T) {
 		})
 		fs.Append(task1Event)
 
-		task2Event, _ := stream.NewEvent(stream.MessageTypeTask, &stream.TaskEvent{
+		task2Event, _ := stream.NewTaskEvent(&stream.TaskEvent{
 			ID:          "task-1",
 			SessionID:   "test-session",
 			Order:       1,
@@ -330,13 +330,12 @@ func TestHandleState(t *testing.T) {
 		require.NoError(t, err)
 		defer fs.Close()
 
-		// Add input request event
-		inputEvent, _ := stream.NewEvent(stream.MessageTypeInputRequest, &stream.InputRequestEvent{
+		// Add input request event (in State Protocol, presence means pending)
+		inputEvent, _ := stream.NewInputRequestEvent(&stream.InputRequestEvent{
 			ID:        "input-1",
 			SessionID: "test-session",
 			Iteration: 3,
 			Question:  "What do you want to do?",
-			Responded: false,
 		})
 		fs.Append(inputEvent)
 
@@ -357,7 +356,7 @@ func TestHandleState(t *testing.T) {
 		require.NotNil(t, state.LastInput)
 		assert.Equal(t, "input-1", state.LastInput.ID)
 		assert.Equal(t, "What do you want to do?", state.LastInput.Question)
-		assert.False(t, state.LastInput.Responded)
+		// In State Protocol, presence in snapshot means pending (not responded)
 	})
 
 	t.Run("rejects non-GET methods", func(t *testing.T) {
@@ -489,13 +488,13 @@ func TestHandleStream(t *testing.T) {
 		defer fs.Close()
 
 		// Add some events
-		event1, _ := stream.NewEvent(stream.MessageTypeSession, &stream.SessionEvent{
+		event1, _ := stream.NewSessionEvent(&stream.SessionEvent{
 			ID:     "session-1",
 			Status: stream.SessionStatusRunning,
 		})
 		fs.Append(event1)
 
-		event2, _ := stream.NewEvent(stream.MessageTypeTask, &stream.TaskEvent{
+		event2, _ := stream.NewTaskEvent(&stream.TaskEvent{
 			ID:          "task-1",
 			Description: "Test task",
 		})
@@ -560,7 +559,7 @@ func TestHandleStream(t *testing.T) {
 
 		// Add events
 		for i := 0; i < 5; i++ {
-			event, _ := stream.NewEvent(stream.MessageTypeSession, &stream.SessionEvent{
+			event, _ := stream.NewSessionEvent(&stream.SessionEvent{
 				ID:        fmt.Sprintf("session-%d", i),
 				Iteration: i,
 			})

@@ -273,8 +273,8 @@ func (c *StreamClient) parseSSEStream(ctx context.Context, body io.Reader, event
 // SendCommand sends a command to the stream server and waits for acknowledgment.
 // Returns the acknowledgment or an error if the command fails.
 func (c *StreamClient) SendCommand(ctx context.Context, cmd *Command) (*Ack, error) {
-	// Create command event
-	event, err := NewEvent(MessageTypeCommand, cmd)
+	// Create command event using State Protocol format
+	event, err := NewCommandEvent(cmd)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create command event: %w", err)
 	}
@@ -330,13 +330,54 @@ func (c *StreamClient) SendBackgroundCommand(ctx context.Context, commandID stri
 	return c.SendCommand(ctx, cmd)
 }
 
-// SendInputResponse sends a response to an input request.
-func (c *StreamClient) SendInputResponse(ctx context.Context, commandID, requestID, response string) (*Ack, error) {
-	cmd, err := NewInputResponseCommand(commandID, requestID, response)
-	if err != nil {
-		return nil, err
+// SendInputResponse sends an input response event to the stream server.
+// This creates a durable input_response event per the State Protocol pattern.
+func (c *StreamClient) SendInputResponse(ctx context.Context, responseID, requestID, response string) (*Ack, error) {
+	// Create input response using State Protocol format
+	ir := &InputResponse{
+		ID:        responseID,
+		RequestID: requestID,
+		Response:  response,
 	}
-	return c.SendCommand(ctx, cmd)
+	event, err := NewInputResponseEvent(ir)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create input response event: %w", err)
+	}
+
+	data, err := event.Marshal()
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal input response: %w", err)
+	}
+
+	req, err := http.NewRequestWithContext(ctx, "POST", c.baseURL+"/input", bytes.NewReader(data))
+	if err != nil {
+		return nil, fmt.Errorf("failed to create request: %w", err)
+	}
+	c.addAuthHeader(req)
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("failed to send input response: %w", err)
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read response: %w", err)
+	}
+
+	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusAccepted {
+		return nil, fmt.Errorf("server returned status %d: %s", resp.StatusCode, string(body))
+	}
+
+	// Parse acknowledgment
+	var ack Ack
+	if err := json.Unmarshal(body, &ack); err != nil {
+		return nil, fmt.Errorf("failed to parse acknowledgment: %w", err)
+	}
+
+	return &ack, nil
 }
 
 // GetState fetches the current state snapshot from the server.

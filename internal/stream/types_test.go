@@ -15,13 +15,15 @@ func TestNewEvent(t *testing.T) {
 	tests := []struct {
 		name    string
 		msgType MessageType
-		data    any
+		key     string
+		value   any
 		wantErr bool
 	}{
 		{
 			name:    "session event",
 			msgType: MessageTypeSession,
-			data: SessionEvent{
+			key:     "session:sess-123",
+			value: Session{
 				ID:        "sess-123",
 				Repo:      "owner/repo",
 				Branch:    "feature-branch",
@@ -34,7 +36,8 @@ func TestNewEvent(t *testing.T) {
 		{
 			name:    "task event",
 			msgType: MessageTypeTask,
-			data: TaskEvent{
+			key:     "task:task-1",
+			value: Task{
 				ID:          "task-1",
 				SessionID:   "sess-123",
 				Order:       0,
@@ -47,7 +50,8 @@ func TestNewEvent(t *testing.T) {
 		{
 			name:    "claude event",
 			msgType: MessageTypeClaudeEvent,
-			data: ClaudeEvent{
+			key:     "claude_event:claude-1",
+			value: ClaudeEvent{
 				ID:        "claude-1",
 				SessionID: "sess-123",
 				Iteration: 1,
@@ -60,19 +64,31 @@ func TestNewEvent(t *testing.T) {
 		{
 			name:    "input request event",
 			msgType: MessageTypeInputRequest,
-			data: InputRequestEvent{
+			key:     "input_request:input-1",
+			value: InputRequest{
 				ID:        "input-1",
 				SessionID: "sess-123",
 				Iteration: 1,
 				Question:  "What should I do?",
-				Responded: false,
+			},
+			wantErr: false,
+		},
+		{
+			name:    "input response event",
+			msgType: MessageTypeInputResponse,
+			key:     "input_response:resp-1",
+			value: InputResponse{
+				ID:        "resp-1",
+				RequestID: "input-1",
+				Response:  "Please continue",
 			},
 			wantErr: false,
 		},
 		{
 			name:    "command event",
 			msgType: MessageTypeCommand,
-			data: Command{
+			key:     "command:cmd-1",
+			value: Command{
 				ID:   "cmd-1",
 				Type: CommandTypeKill,
 			},
@@ -81,16 +97,18 @@ func TestNewEvent(t *testing.T) {
 		{
 			name:    "ack event",
 			msgType: MessageTypeAck,
-			data: Ack{
+			key:     "ack:cmd-1",
+			value: Ack{
 				CommandID: "cmd-1",
 				Status:    AckStatusSuccess,
 			},
 			wantErr: false,
 		},
 		{
-			name:    "unmarshallable data",
+			name:    "unmarshallable value",
 			msgType: MessageTypeSession,
-			data:    make(chan int), // channels cannot be marshaled
+			key:     "session:bad",
+			value:   make(chan int), // channels cannot be marshaled
 			wantErr: true,
 		},
 	}
@@ -99,7 +117,7 @@ func TestNewEvent(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 
-			event, err := NewEvent(tt.msgType, tt.data)
+			event, err := NewEvent(tt.msgType, tt.key, tt.value)
 			if tt.wantErr {
 				assert.Error(t, err)
 				assert.Nil(t, event)
@@ -109,26 +127,38 @@ func TestNewEvent(t *testing.T) {
 			require.NoError(t, err)
 			require.NotNil(t, event)
 			assert.Equal(t, tt.msgType, event.Type)
-			assert.False(t, event.Timestamp.IsZero())
-			assert.NotEmpty(t, event.Data)
+			assert.Equal(t, tt.key, event.Key)
+			assert.False(t, event.Headers.Timestamp.IsZero())
+			assert.Equal(t, OperationInsert, event.Headers.Operation)
+			assert.NotEmpty(t, event.Value)
 		})
 	}
+}
+
+func TestNewEventWithOp(t *testing.T) {
+	t.Parallel()
+
+	session := Session{ID: "test", Status: SessionStatusRunning}
+	event, err := NewEventWithOp(MessageTypeSession, "session:test", session, OperationUpdate)
+	require.NoError(t, err)
+	assert.Equal(t, OperationUpdate, event.Headers.Operation)
 }
 
 func TestMustNewEvent(t *testing.T) {
 	t.Parallel()
 
-	t.Run("valid data", func(t *testing.T) {
+	t.Run("valid value", func(t *testing.T) {
 		t.Parallel()
-		event := MustNewEvent(MessageTypeSession, SessionEvent{ID: "test"})
+		event := MustNewEvent(MessageTypeSession, "session:test", Session{ID: "test"})
 		assert.NotNil(t, event)
 		assert.Equal(t, MessageTypeSession, event.Type)
+		assert.Equal(t, "session:test", event.Key)
 	})
 
-	t.Run("invalid data panics", func(t *testing.T) {
+	t.Run("invalid value panics", func(t *testing.T) {
 		t.Parallel()
 		assert.Panics(t, func() {
-			MustNewEvent(MessageTypeSession, make(chan int))
+			MustNewEvent(MessageTypeSession, "session:bad", make(chan int))
 		})
 	})
 }
@@ -136,7 +166,7 @@ func TestMustNewEvent(t *testing.T) {
 func TestEventMarshalUnmarshal(t *testing.T) {
 	t.Parallel()
 
-	original := MustNewEvent(MessageTypeSession, SessionEvent{
+	original := MustNewEvent(MessageTypeSession, "session:sess-123", Session{
 		ID:        "sess-123",
 		Repo:      "owner/repo",
 		Branch:    "main",
@@ -158,7 +188,9 @@ func TestEventMarshalUnmarshal(t *testing.T) {
 
 	assert.Equal(t, original.Seq, restored.Seq)
 	assert.Equal(t, original.Type, restored.Type)
-	assert.Equal(t, original.Timestamp.UTC(), restored.Timestamp.UTC())
+	assert.Equal(t, original.Key, restored.Key)
+	assert.Equal(t, original.Headers.Operation, restored.Headers.Operation)
+	assert.Equal(t, original.Headers.Timestamp.UTC(), restored.Headers.Timestamp.UTC())
 }
 
 func TestUnmarshalEventInvalid(t *testing.T) {
@@ -188,14 +220,14 @@ func TestEventDataAccessors(t *testing.T) {
 	t.Run("SessionData", func(t *testing.T) {
 		t.Parallel()
 
-		originalData := SessionEvent{
+		originalData := Session{
 			ID:        "sess-123",
 			Repo:      "owner/repo",
 			Branch:    "main",
 			Status:    SessionStatusDone,
 			Iteration: 10,
 		}
-		event := MustNewEvent(MessageTypeSession, originalData)
+		event := MustNewEvent(MessageTypeSession, "session:sess-123", originalData)
 
 		data, err := event.SessionData()
 		require.NoError(t, err)
@@ -204,7 +236,7 @@ func TestEventDataAccessors(t *testing.T) {
 		assert.Equal(t, originalData.Status, data.Status)
 
 		// Wrong type should error
-		wrongEvent := MustNewEvent(MessageTypeTask, TaskEvent{})
+		wrongEvent := MustNewEvent(MessageTypeTask, "task:1", Task{})
 		_, err = wrongEvent.SessionData()
 		assert.Error(t, err)
 	})
@@ -212,7 +244,7 @@ func TestEventDataAccessors(t *testing.T) {
 	t.Run("TaskData", func(t *testing.T) {
 		t.Parallel()
 
-		originalData := TaskEvent{
+		originalData := Task{
 			ID:          "task-1",
 			SessionID:   "sess-123",
 			Order:       2,
@@ -220,7 +252,7 @@ func TestEventDataAccessors(t *testing.T) {
 			Description: "Fix the bug",
 			Status:      TaskStatusCompleted,
 		}
-		event := MustNewEvent(MessageTypeTask, originalData)
+		event := MustNewEvent(MessageTypeTask, "task:task-1", originalData)
 
 		data, err := event.TaskData()
 		require.NoError(t, err)
@@ -229,7 +261,7 @@ func TestEventDataAccessors(t *testing.T) {
 		assert.Equal(t, originalData.Status, data.Status)
 
 		// Wrong type should error
-		wrongEvent := MustNewEvent(MessageTypeSession, SessionEvent{})
+		wrongEvent := MustNewEvent(MessageTypeSession, "session:1", Session{})
 		_, err = wrongEvent.TaskData()
 		assert.Error(t, err)
 	})
@@ -244,7 +276,7 @@ func TestEventDataAccessors(t *testing.T) {
 			Sequence:  5,
 			Message:   map[string]any{"type": "result", "output": "done"},
 		}
-		event := MustNewEvent(MessageTypeClaudeEvent, originalData)
+		event := MustNewEvent(MessageTypeClaudeEvent, "claude_event:claude-1", originalData)
 
 		data, err := event.ClaudeEventData()
 		require.NoError(t, err)
@@ -252,7 +284,7 @@ func TestEventDataAccessors(t *testing.T) {
 		assert.Equal(t, originalData.Sequence, data.Sequence)
 
 		// Wrong type should error
-		wrongEvent := MustNewEvent(MessageTypeSession, SessionEvent{})
+		wrongEvent := MustNewEvent(MessageTypeSession, "session:1", Session{})
 		_, err = wrongEvent.ClaudeEventData()
 		assert.Error(t, err)
 	})
@@ -260,28 +292,44 @@ func TestEventDataAccessors(t *testing.T) {
 	t.Run("InputRequestData", func(t *testing.T) {
 		t.Parallel()
 
-		response := "Yes, proceed"
-		originalData := InputRequestEvent{
+		originalData := InputRequest{
 			ID:        "input-1",
 			SessionID: "sess-123",
 			Iteration: 2,
 			Question:  "Should I continue?",
-			Responded: true,
-			Response:  &response,
 		}
-		event := MustNewEvent(MessageTypeInputRequest, originalData)
+		event := MustNewEvent(MessageTypeInputRequest, "input_request:input-1", originalData)
 
 		data, err := event.InputRequestData()
 		require.NoError(t, err)
 		assert.Equal(t, originalData.ID, data.ID)
 		assert.Equal(t, originalData.Question, data.Question)
-		assert.True(t, data.Responded)
-		require.NotNil(t, data.Response)
-		assert.Equal(t, response, *data.Response)
 
 		// Wrong type should error
-		wrongEvent := MustNewEvent(MessageTypeSession, SessionEvent{})
+		wrongEvent := MustNewEvent(MessageTypeSession, "session:1", Session{})
 		_, err = wrongEvent.InputRequestData()
+		assert.Error(t, err)
+	})
+
+	t.Run("InputResponseData", func(t *testing.T) {
+		t.Parallel()
+
+		originalData := InputResponse{
+			ID:        "resp-1",
+			RequestID: "input-1",
+			Response:  "Yes, continue",
+		}
+		event := MustNewEvent(MessageTypeInputResponse, "input_response:resp-1", originalData)
+
+		data, err := event.InputResponseData()
+		require.NoError(t, err)
+		assert.Equal(t, originalData.ID, data.ID)
+		assert.Equal(t, originalData.RequestID, data.RequestID)
+		assert.Equal(t, originalData.Response, data.Response)
+
+		// Wrong type should error
+		wrongEvent := MustNewEvent(MessageTypeSession, "session:1", Session{})
+		_, err = wrongEvent.InputResponseData()
 		assert.Error(t, err)
 	})
 
@@ -292,7 +340,7 @@ func TestEventDataAccessors(t *testing.T) {
 			ID:   "cmd-1",
 			Type: CommandTypeKill,
 		}
-		event := MustNewEvent(MessageTypeCommand, originalCmd)
+		event := MustNewEvent(MessageTypeCommand, "command:cmd-1", originalCmd)
 
 		data, err := event.CommandData()
 		require.NoError(t, err)
@@ -300,7 +348,7 @@ func TestEventDataAccessors(t *testing.T) {
 		assert.Equal(t, originalCmd.Type, data.Type)
 
 		// Wrong type should error
-		wrongEvent := MustNewEvent(MessageTypeSession, SessionEvent{})
+		wrongEvent := MustNewEvent(MessageTypeSession, "session:1", Session{})
 		_, err = wrongEvent.CommandData()
 		assert.Error(t, err)
 	})
@@ -313,7 +361,7 @@ func TestEventDataAccessors(t *testing.T) {
 			Status:    AckStatusError,
 			Error:     "something went wrong",
 		}
-		event := MustNewEvent(MessageTypeAck, originalAck)
+		event := MustNewEvent(MessageTypeAck, "ack:cmd-1", originalAck)
 
 		data, err := event.AckData()
 		require.NoError(t, err)
@@ -322,7 +370,7 @@ func TestEventDataAccessors(t *testing.T) {
 		assert.Equal(t, originalAck.Error, data.Error)
 
 		// Wrong type should error
-		wrongEvent := MustNewEvent(MessageTypeSession, SessionEvent{})
+		wrongEvent := MustNewEvent(MessageTypeSession, "session:1", Session{})
 		_, err = wrongEvent.AckData()
 		assert.Error(t, err)
 	})
@@ -330,20 +378,6 @@ func TestEventDataAccessors(t *testing.T) {
 
 func TestCommandCreators(t *testing.T) {
 	t.Parallel()
-
-	t.Run("NewInputResponseCommand", func(t *testing.T) {
-		t.Parallel()
-
-		cmd, err := NewInputResponseCommand("cmd-1", "req-1", "my response")
-		require.NoError(t, err)
-		assert.Equal(t, "cmd-1", cmd.ID)
-		assert.Equal(t, CommandTypeInputResponse, cmd.Type)
-
-		payload, err := cmd.InputResponsePayloadData()
-		require.NoError(t, err)
-		assert.Equal(t, "req-1", payload.RequestID)
-		assert.Equal(t, "my response", payload.Response)
-	})
 
 	t.Run("NewKillCommand", func(t *testing.T) {
 		t.Parallel()
@@ -396,24 +430,10 @@ func TestKillPayloadWithEmptyPayload(t *testing.T) {
 func TestCommandPayloadErrors(t *testing.T) {
 	t.Parallel()
 
-	t.Run("InputResponsePayload wrong type", func(t *testing.T) {
-		t.Parallel()
-		cmd := &Command{ID: "1", Type: CommandTypeKill}
-		_, err := cmd.InputResponsePayloadData()
-		assert.Error(t, err)
-	})
-
 	t.Run("KillPayload wrong type", func(t *testing.T) {
 		t.Parallel()
-		cmd := &Command{ID: "1", Type: CommandTypeInputResponse}
+		cmd := &Command{ID: "1", Type: CommandTypeBackground}
 		_, err := cmd.KillPayloadData()
-		assert.Error(t, err)
-	})
-
-	t.Run("InputResponsePayload invalid json", func(t *testing.T) {
-		t.Parallel()
-		cmd := &Command{ID: "1", Type: CommandTypeInputResponse, Payload: json.RawMessage("{invalid")}
-		_, err := cmd.InputResponsePayloadData()
 		assert.Error(t, err)
 	})
 
@@ -475,6 +495,7 @@ func TestMessageTypeConstants(t *testing.T) {
 	assert.Equal(t, MessageType("task"), MessageTypeTask)
 	assert.Equal(t, MessageType("claude_event"), MessageTypeClaudeEvent)
 	assert.Equal(t, MessageType("input_request"), MessageTypeInputRequest)
+	assert.Equal(t, MessageType("input_response"), MessageTypeInputResponse)
 	assert.Equal(t, MessageType("ack"), MessageTypeAck)
 	assert.Equal(t, MessageType("command"), MessageTypeCommand)
 }
@@ -485,14 +506,22 @@ func TestCommandTypeConstants(t *testing.T) {
 	// Verify command type constants
 	assert.Equal(t, CommandType("kill"), CommandTypeKill)
 	assert.Equal(t, CommandType("background"), CommandTypeBackground)
-	assert.Equal(t, CommandType("input_response"), CommandTypeInputResponse)
+}
+
+func TestOperationConstants(t *testing.T) {
+	t.Parallel()
+
+	// Verify operation constants
+	assert.Equal(t, Operation("insert"), OperationInsert)
+	assert.Equal(t, Operation("update"), OperationUpdate)
+	assert.Equal(t, Operation("delete"), OperationDelete)
 }
 
 func TestEventJSONRoundTrip(t *testing.T) {
 	t.Parallel()
 
 	// Create a complex event and verify it survives JSON round-trip
-	session := SessionEvent{
+	session := Session{
 		ID:        "sess-abc123",
 		Repo:      "owner/repo-name",
 		Branch:    "feature/my-branch",
@@ -502,8 +531,9 @@ func TestEventJSONRoundTrip(t *testing.T) {
 		StartedAt: time.Date(2025, 6, 15, 14, 30, 0, 0, time.UTC),
 	}
 
-	event := MustNewEvent(MessageTypeSession, session)
+	event := MustNewEvent(MessageTypeSession, "session:sess-abc123", session)
 	event.Seq = 100
+	event.Headers.TxID = "tx-456"
 
 	// Marshal to JSON
 	jsonData, err := json.Marshal(event)
@@ -516,6 +546,9 @@ func TestEventJSONRoundTrip(t *testing.T) {
 
 	assert.Equal(t, event.Seq, restored.Seq)
 	assert.Equal(t, event.Type, restored.Type)
+	assert.Equal(t, event.Key, restored.Key)
+	assert.Equal(t, event.Headers.Operation, restored.Headers.Operation)
+	assert.Equal(t, event.Headers.TxID, restored.Headers.TxID)
 
 	// Extract and verify session data
 	restoredSession, err := restored.SessionData()
@@ -527,4 +560,127 @@ func TestEventJSONRoundTrip(t *testing.T) {
 	assert.Equal(t, session.Status, restoredSession.Status)
 	assert.Equal(t, session.Iteration, restoredSession.Iteration)
 	assert.Equal(t, session.StartedAt.UTC(), restoredSession.StartedAt.UTC())
+}
+
+func TestStateProtocolFormat(t *testing.T) {
+	t.Parallel()
+
+	// Verify the JSON format matches State Protocol specification
+	session := Session{
+		ID:     "test-123",
+		Repo:   "owner/repo",
+		Branch: "main",
+		Status: SessionStatusRunning,
+	}
+
+	event, err := NewSessionEvent(&session)
+	require.NoError(t, err)
+
+	jsonData, err := event.Marshal()
+	require.NoError(t, err)
+
+	// Parse into map to verify structure
+	var raw map[string]any
+	err = json.Unmarshal(jsonData, &raw)
+	require.NoError(t, err)
+
+	// Verify State Protocol required fields
+	assert.Equal(t, "session", raw["type"])
+	assert.Equal(t, "session:test-123", raw["key"])
+	assert.NotNil(t, raw["value"])
+	assert.NotNil(t, raw["headers"])
+
+	// Verify headers structure
+	headers := raw["headers"].(map[string]any)
+	assert.Equal(t, "insert", headers["operation"])
+	assert.NotEmpty(t, headers["timestamp"])
+}
+
+func TestHelperEventCreators(t *testing.T) {
+	t.Parallel()
+
+	t.Run("NewSessionEvent", func(t *testing.T) {
+		t.Parallel()
+		session := &Session{ID: "s1", Status: SessionStatusRunning}
+		event, err := NewSessionEvent(session)
+		require.NoError(t, err)
+		assert.Equal(t, MessageTypeSession, event.Type)
+		assert.Equal(t, "session:s1", event.Key)
+	})
+
+	t.Run("NewSessionEventWithOp", func(t *testing.T) {
+		t.Parallel()
+		session := &Session{ID: "s1", Status: SessionStatusRunning}
+		event, err := NewSessionEventWithOp(session, OperationUpdate)
+		require.NoError(t, err)
+		assert.Equal(t, OperationUpdate, event.Headers.Operation)
+	})
+
+	t.Run("NewTaskEvent", func(t *testing.T) {
+		t.Parallel()
+		task := &Task{ID: "t1", Status: TaskStatusPending}
+		event, err := NewTaskEvent(task)
+		require.NoError(t, err)
+		assert.Equal(t, MessageTypeTask, event.Type)
+		assert.Equal(t, "task:t1", event.Key)
+	})
+
+	t.Run("NewClaudeEventEvent", func(t *testing.T) {
+		t.Parallel()
+		ce := &ClaudeEvent{ID: "ce1", Message: "test"}
+		event, err := NewClaudeEventEvent(ce)
+		require.NoError(t, err)
+		assert.Equal(t, MessageTypeClaudeEvent, event.Type)
+		assert.Equal(t, "claude_event:ce1", event.Key)
+	})
+
+	t.Run("NewInputRequestEvent", func(t *testing.T) {
+		t.Parallel()
+		ir := &InputRequest{ID: "ir1", Question: "test?"}
+		event, err := NewInputRequestEvent(ir)
+		require.NoError(t, err)
+		assert.Equal(t, MessageTypeInputRequest, event.Type)
+		assert.Equal(t, "input_request:ir1", event.Key)
+	})
+
+	t.Run("NewInputResponseEvent", func(t *testing.T) {
+		t.Parallel()
+		ir := &InputResponse{ID: "resp1", RequestID: "ir1", Response: "yes"}
+		event, err := NewInputResponseEvent(ir)
+		require.NoError(t, err)
+		assert.Equal(t, MessageTypeInputResponse, event.Type)
+		assert.Equal(t, "input_response:resp1", event.Key)
+	})
+
+	t.Run("NewCommandEvent", func(t *testing.T) {
+		t.Parallel()
+		cmd := &Command{ID: "cmd1", Type: CommandTypeKill}
+		event, err := NewCommandEvent(cmd)
+		require.NoError(t, err)
+		assert.Equal(t, MessageTypeCommand, event.Type)
+		assert.Equal(t, "command:cmd1", event.Key)
+	})
+
+	t.Run("NewAckEvent", func(t *testing.T) {
+		t.Parallel()
+		ack := &Ack{CommandID: "cmd1", Status: AckStatusSuccess}
+		event, err := NewAckEvent(ack)
+		require.NoError(t, err)
+		assert.Equal(t, MessageTypeAck, event.Type)
+		assert.Equal(t, "ack:cmd1", event.Key)
+	})
+}
+
+func TestLegacyAliases(t *testing.T) {
+	t.Parallel()
+
+	// Verify legacy type aliases work
+	var session SessionEvent = Session{ID: "test"}
+	assert.Equal(t, "test", session.ID)
+
+	var task TaskEvent = Task{ID: "task1"}
+	assert.Equal(t, "task1", task.ID)
+
+	var input InputRequestEvent = InputRequest{ID: "input1"}
+	assert.Equal(t, "input1", input.ID)
 }

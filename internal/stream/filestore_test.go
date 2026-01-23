@@ -40,9 +40,9 @@ func TestNewFileStore(t *testing.T) {
 		fs1, err := NewFileStore(path)
 		require.NoError(t, err)
 
-		event1 := MustNewEvent(MessageTypeSession, SessionEvent{ID: "sess-1"})
+		event1 := MustNewEvent(MessageTypeSession, "session:sess-1", Session{ID: "sess-1"})
 		require.NoError(t, fs1.Append(event1))
-		event2 := MustNewEvent(MessageTypeTask, TaskEvent{ID: "task-1"})
+		event2 := MustNewEvent(MessageTypeTask, "task:task-1", Task{ID: "task-1"})
 		require.NoError(t, fs1.Append(event2))
 		fs1.Close()
 
@@ -55,7 +55,7 @@ func TestNewFileStore(t *testing.T) {
 		assert.Equal(t, uint64(2), fs2.LastSeq())
 
 		// New event should get sequence 3
-		event3 := MustNewEvent(MessageTypeAck, Ack{CommandID: "cmd-1"})
+		event3 := MustNewEvent(MessageTypeAck, "ack:cmd-1", Ack{CommandID: "cmd-1"})
 		require.NoError(t, fs2.Append(event3))
 		assert.Equal(t, uint64(3), event3.Seq)
 	})
@@ -92,15 +92,15 @@ func TestFileStoreAppend(t *testing.T) {
 		require.NoError(t, err)
 		defer fs.Close()
 
-		event1 := MustNewEvent(MessageTypeSession, SessionEvent{ID: "sess-1"})
+		event1 := MustNewEvent(MessageTypeSession, "session:sess-1", Session{ID: "sess-1"})
 		require.NoError(t, fs.Append(event1))
 		assert.Equal(t, uint64(1), event1.Seq)
 
-		event2 := MustNewEvent(MessageTypeTask, TaskEvent{ID: "task-1"})
+		event2 := MustNewEvent(MessageTypeTask, "task:task-1", Task{ID: "task-1"})
 		require.NoError(t, fs.Append(event2))
 		assert.Equal(t, uint64(2), event2.Seq)
 
-		event3 := MustNewEvent(MessageTypeClaudeEvent, ClaudeEvent{ID: "claude-1"})
+		event3 := MustNewEvent(MessageTypeClaudeEvent, "claude_event:claude-1", ClaudeEvent{ID: "claude-1"})
 		require.NoError(t, fs.Append(event3))
 		assert.Equal(t, uint64(3), event3.Seq)
 
@@ -117,7 +117,7 @@ func TestFileStoreAppend(t *testing.T) {
 		require.NoError(t, err)
 		defer fs.Close()
 
-		event := MustNewEvent(MessageTypeSession, SessionEvent{ID: "sess-1"})
+		event := MustNewEvent(MessageTypeSession, "session:sess-1", Session{ID: "sess-1"})
 		require.NoError(t, fs.Append(event))
 
 		// Verify data was stored (durable-streams manages its own storage)
@@ -135,7 +135,7 @@ func TestFileStoreAppend(t *testing.T) {
 		fs, err := NewFileStore(path)
 		require.NoError(t, err)
 
-		event := MustNewEvent(MessageTypeSession, SessionEvent{
+		event := MustNewEvent(MessageTypeSession, "session:sess-test", Session{
 			ID:     "sess-test",
 			Repo:   "owner/repo",
 			Branch: "main",
@@ -176,7 +176,7 @@ func TestFileStoreRead(t *testing.T) {
 
 		// Append some events
 		for i := 0; i < 5; i++ {
-			event := MustNewEvent(MessageTypeSession, SessionEvent{ID: "sess-1"})
+			event := MustNewEvent(MessageTypeSession, "session:sess-1", Session{ID: "sess-1"})
 			require.NoError(t, fs.Append(event))
 		}
 
@@ -202,7 +202,7 @@ func TestFileStoreRead(t *testing.T) {
 
 		// Append 10 events
 		for i := 0; i < 10; i++ {
-			event := MustNewEvent(MessageTypeSession, SessionEvent{ID: "sess-1"})
+			event := MustNewEvent(MessageTypeSession, "session:sess-1", Session{ID: "sess-1"})
 			require.NoError(t, fs.Append(event))
 		}
 
@@ -242,7 +242,7 @@ func TestFileStoreRead(t *testing.T) {
 
 		// Append 3 events
 		for i := 0; i < 3; i++ {
-			event := MustNewEvent(MessageTypeSession, SessionEvent{ID: "sess-1"})
+			event := MustNewEvent(MessageTypeSession, "session:sess-1", Session{ID: "sess-1"})
 			require.NoError(t, fs.Append(event))
 		}
 
@@ -262,7 +262,7 @@ func TestFileStoreRead(t *testing.T) {
 		require.NoError(t, err)
 		defer fs.Close()
 
-		originalSession := SessionEvent{
+		originalSession := Session{
 			ID:        "sess-abc",
 			Repo:      "owner/repo",
 			Branch:    "feature-branch",
@@ -272,7 +272,7 @@ func TestFileStoreRead(t *testing.T) {
 			StartedAt: time.Date(2025, 6, 15, 10, 30, 0, 0, time.UTC),
 		}
 
-		event := MustNewEvent(MessageTypeSession, originalSession)
+		event := MustNewEvent(MessageTypeSession, "session:sess-abc", originalSession)
 		require.NoError(t, fs.Append(event))
 
 		events, err := fs.Read(1)
@@ -306,7 +306,7 @@ func TestFileStoreSubscribe(t *testing.T) {
 
 		// Append some events before subscribing
 		for i := 0; i < 3; i++ {
-			event := MustNewEvent(MessageTypeSession, SessionEvent{ID: "sess-1"})
+			event := MustNewEvent(MessageTypeSession, "session:sess-1", Session{ID: "sess-1"})
 			require.NoError(t, fs.Append(event))
 		}
 
@@ -352,7 +352,7 @@ func TestFileStoreSubscribe(t *testing.T) {
 		go func() {
 			time.Sleep(100 * time.Millisecond)
 			for i := 0; i < 3; i++ {
-				event := MustNewEvent(MessageTypeTask, TaskEvent{ID: "task-1"})
+				event := MustNewEvent(MessageTypeTask, "task:task-1", Task{ID: "task-1"})
 				fs.Append(event)
 				time.Sleep(60 * time.Millisecond)
 			}
@@ -383,7 +383,7 @@ func TestFileStoreSubscribe(t *testing.T) {
 
 		// Append 5 events
 		for i := 0; i < 5; i++ {
-			event := MustNewEvent(MessageTypeSession, SessionEvent{ID: "sess-1"})
+			event := MustNewEvent(MessageTypeSession, "session:sess-1", Session{ID: "sess-1"})
 			require.NoError(t, fs.Append(event))
 		}
 
@@ -465,7 +465,7 @@ func TestFileStoreConcurrency(t *testing.T) {
 			go func(goroutineID int) {
 				defer wg.Done()
 				for j := 0; j < eventsPerGoroutine; j++ {
-					event := MustNewEvent(MessageTypeSession, SessionEvent{ID: "sess-1"})
+					event := MustNewEvent(MessageTypeSession, "session:sess-1", Session{ID: "sess-1"})
 					if err := fs.Append(event); err != nil {
 						t.Errorf("append failed: %v", err)
 					}
@@ -505,7 +505,7 @@ func TestFileStoreConcurrency(t *testing.T) {
 
 		// Write initial events
 		for i := 0; i < 10; i++ {
-			event := MustNewEvent(MessageTypeSession, SessionEvent{ID: "sess-1"})
+			event := MustNewEvent(MessageTypeSession, "session:sess-1", Session{ID: "sess-1"})
 			require.NoError(t, fs.Append(event))
 		}
 
@@ -527,7 +527,7 @@ func TestFileStoreConcurrency(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			for i := 0; i < 100; i++ {
-				event := MustNewEvent(MessageTypeSession, SessionEvent{ID: "sess-1"})
+				event := MustNewEvent(MessageTypeSession, "session:sess-1", Session{ID: "sess-1"})
 				if err := fs.Append(event); err != nil {
 					t.Errorf("append failed: %v", err)
 				}
@@ -551,7 +551,7 @@ func TestFileStoreClose(t *testing.T) {
 		require.NoError(t, err)
 
 		// Write an event to open the file
-		event := MustNewEvent(MessageTypeSession, SessionEvent{ID: "sess-1"})
+		event := MustNewEvent(MessageTypeSession, "session:sess-1", Session{ID: "sess-1"})
 		require.NoError(t, fs.Append(event))
 
 		// Close should succeed
@@ -605,7 +605,7 @@ func TestFileStoreLastSeq(t *testing.T) {
 		defer fs.Close()
 
 		for i := 0; i < 5; i++ {
-			event := MustNewEvent(MessageTypeSession, SessionEvent{ID: "sess-1"})
+			event := MustNewEvent(MessageTypeSession, "session:sess-1", Session{ID: "sess-1"})
 			require.NoError(t, fs.Append(event))
 			assert.Equal(t, uint64(i+1), fs.LastSeq())
 		}
@@ -628,12 +628,12 @@ func TestFileStoreMultipleEventTypes(t *testing.T) {
 	defer fs.Close()
 
 	// Write different event types
-	require.NoError(t, fs.Append(MustNewEvent(MessageTypeSession, SessionEvent{ID: "sess-1"})))
-	require.NoError(t, fs.Append(MustNewEvent(MessageTypeTask, TaskEvent{ID: "task-1"})))
-	require.NoError(t, fs.Append(MustNewEvent(MessageTypeClaudeEvent, ClaudeEvent{ID: "claude-1"})))
-	require.NoError(t, fs.Append(MustNewEvent(MessageTypeInputRequest, InputRequestEvent{ID: "input-1"})))
-	require.NoError(t, fs.Append(MustNewEvent(MessageTypeAck, Ack{CommandID: "cmd-1"})))
-	require.NoError(t, fs.Append(MustNewEvent(MessageTypeCommand, Command{ID: "cmd-2"})))
+	require.NoError(t, fs.Append(MustNewEvent(MessageTypeSession, "session:sess-1", Session{ID: "sess-1"})))
+	require.NoError(t, fs.Append(MustNewEvent(MessageTypeTask, "task:task-1", Task{ID: "task-1"})))
+	require.NoError(t, fs.Append(MustNewEvent(MessageTypeClaudeEvent, "claude_event:claude-1", ClaudeEvent{ID: "claude-1"})))
+	require.NoError(t, fs.Append(MustNewEvent(MessageTypeInputRequest, "input_request:input-1", InputRequest{ID: "input-1"})))
+	require.NoError(t, fs.Append(MustNewEvent(MessageTypeAck, "ack:cmd-1", Ack{CommandID: "cmd-1"})))
+	require.NoError(t, fs.Append(MustNewEvent(MessageTypeCommand, "command:cmd-2", Command{ID: "cmd-2"})))
 
 	events, err := fs.Read(0)
 	require.NoError(t, err)
