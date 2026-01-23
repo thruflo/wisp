@@ -1499,3 +1499,205 @@ func TestBuildCORSOriginsMap(t *testing.T) {
 		}
 	})
 }
+
+// createTestServerWithRateLimit creates a server with custom rate limiting configuration.
+func createTestServerWithRateLimit(t *testing.T, rlConfig *RateLimitConfig) *Server {
+	t.Helper()
+
+	hash, err := auth.HashPassword(testPassword)
+	if err != nil {
+		t.Fatalf("failed to hash password: %v", err)
+	}
+
+	server, err := NewServer(&Config{
+		Port:            0,
+		PasswordHash:    hash,
+		RateLimitConfig: rlConfig,
+	})
+	if err != nil {
+		t.Fatalf("failed to create server: %v", err)
+	}
+
+	return server
+}
+
+func TestAuthRateLimiting(t *testing.T) {
+	// Use a tight rate limit for testing
+	rlConfig := &RateLimitConfig{
+		MaxAttempts: 3,
+		Window:      time.Minute,
+		BlockAfter:  10,
+		BlockTime:   time.Minute,
+	}
+	server := createTestServerWithRateLimit(t, rlConfig)
+	mux := http.NewServeMux()
+	server.setupRoutes(mux)
+
+	t.Run("allows requests within limit", func(t *testing.T) {
+		// First 3 requests should be allowed
+		for i := 0; i < 3; i++ {
+			body := `{"password":"wrong"}`
+			req := httptest.NewRequest(http.MethodPost, "/auth", strings.NewReader(body))
+			req.Header.Set("Content-Type", "application/json")
+			req.RemoteAddr = "10.0.0.1:12345"
+			w := httptest.NewRecorder()
+
+			mux.ServeHTTP(w, req)
+
+			// Should get 401 for wrong password, not 429 for rate limit
+			if w.Code != http.StatusUnauthorized {
+				t.Errorf("request %d: expected status %d, got %d", i+1, http.StatusUnauthorized, w.Code)
+			}
+		}
+	})
+
+	t.Run("blocks requests over limit", func(t *testing.T) {
+		// 4th request from same IP should be rate limited
+		body := `{"password":"wrong"}`
+		req := httptest.NewRequest(http.MethodPost, "/auth", strings.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		req.RemoteAddr = "10.0.0.1:12345"
+		w := httptest.NewRecorder()
+
+		mux.ServeHTTP(w, req)
+
+		if w.Code != http.StatusTooManyRequests {
+			t.Errorf("expected status %d, got %d", http.StatusTooManyRequests, w.Code)
+		}
+
+		// Check Retry-After header is set
+		retryAfter := w.Header().Get("Retry-After")
+		if retryAfter == "" {
+			t.Error("expected Retry-After header to be set")
+		}
+
+		// Check response body contains retry_after
+		var response map[string]interface{}
+		if err := json.Unmarshal(w.Body.Bytes(), &response); err != nil {
+			t.Fatalf("failed to parse response: %v", err)
+		}
+		if _, ok := response["retry_after"]; !ok {
+			t.Error("expected response to contain retry_after")
+		}
+		if response["error"] != "rate limit exceeded" {
+			t.Errorf("expected error to be 'rate limit exceeded', got %v", response["error"])
+		}
+	})
+
+	t.Run("different IPs have separate limits", func(t *testing.T) {
+		// Request from different IP should be allowed
+		body := `{"password":"wrong"}`
+		req := httptest.NewRequest(http.MethodPost, "/auth", strings.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		req.RemoteAddr = "10.0.0.2:12345" // Different IP
+		w := httptest.NewRecorder()
+
+		mux.ServeHTTP(w, req)
+
+		if w.Code != http.StatusUnauthorized {
+			t.Errorf("expected status %d for different IP, got %d", http.StatusUnauthorized, w.Code)
+		}
+	})
+}
+
+func TestAuthRateLimitingWithXForwardedFor(t *testing.T) {
+	rlConfig := &RateLimitConfig{
+		MaxAttempts: 2,
+		Window:      time.Minute,
+		BlockAfter:  10,
+		BlockTime:   time.Minute,
+	}
+	server := createTestServerWithRateLimit(t, rlConfig)
+	mux := http.NewServeMux()
+	server.setupRoutes(mux)
+
+	// Use up limit for client IP (via X-Forwarded-For)
+	for i := 0; i < 2; i++ {
+		body := `{"password":"wrong"}`
+		req := httptest.NewRequest(http.MethodPost, "/auth", strings.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("X-Forwarded-For", "203.0.113.50")
+		req.RemoteAddr = "10.0.0.1:12345" // Proxy IP
+		w := httptest.NewRecorder()
+
+		mux.ServeHTTP(w, req)
+	}
+
+	// 3rd request from same client IP should be rate limited
+	body := `{"password":"wrong"}`
+	req := httptest.NewRequest(http.MethodPost, "/auth", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Forwarded-For", "203.0.113.50")
+	req.RemoteAddr = "10.0.0.1:12345"
+	w := httptest.NewRecorder()
+
+	mux.ServeHTTP(w, req)
+
+	if w.Code != http.StatusTooManyRequests {
+		t.Errorf("expected status %d, got %d", http.StatusTooManyRequests, w.Code)
+	}
+
+	// Request from different client IP (via X-Forwarded-For) should still be allowed
+	body = `{"password":"wrong"}`
+	req = httptest.NewRequest(http.MethodPost, "/auth", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Forwarded-For", "203.0.113.51") // Different client IP
+	req.RemoteAddr = "10.0.0.1:12345"                 // Same proxy IP
+	w = httptest.NewRecorder()
+
+	mux.ServeHTTP(w, req)
+
+	if w.Code != http.StatusUnauthorized {
+		t.Errorf("expected status %d for different client IP, got %d", http.StatusUnauthorized, w.Code)
+	}
+}
+
+func TestAuthRateLimitingSuccessResetsFailures(t *testing.T) {
+	rlConfig := &RateLimitConfig{
+		MaxAttempts: 10, // High limit so we focus on failure tracking
+		Window:      time.Minute,
+		BlockAfter:  3, // Block after 3 failed attempts
+		BlockTime:   time.Minute,
+	}
+	server := createTestServerWithRateLimit(t, rlConfig)
+	mux := http.NewServeMux()
+	server.setupRoutes(mux)
+
+	ip := "10.0.0.3:12345"
+
+	// Make 2 failed attempts
+	for i := 0; i < 2; i++ {
+		body := `{"password":"wrong"}`
+		req := httptest.NewRequest(http.MethodPost, "/auth", strings.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		req.RemoteAddr = ip
+		w := httptest.NewRecorder()
+		mux.ServeHTTP(w, req)
+	}
+
+	// Successful login should reset failure counter
+	body := fmt.Sprintf(`{"password":"%s"}`, testPassword)
+	req := httptest.NewRequest(http.MethodPost, "/auth", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.RemoteAddr = ip
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Errorf("expected successful login status %d, got %d", http.StatusOK, w.Code)
+	}
+
+	// Now make 2 more failed attempts - should NOT be blocked since counter was reset
+	for i := 0; i < 2; i++ {
+		body := `{"password":"wrong"}`
+		req := httptest.NewRequest(http.MethodPost, "/auth", strings.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		req.RemoteAddr = ip
+		w := httptest.NewRecorder()
+		mux.ServeHTTP(w, req)
+
+		if w.Code != http.StatusUnauthorized {
+			t.Errorf("attempt %d after reset: expected status %d, got %d", i+1, http.StatusUnauthorized, w.Code)
+		}
+	}
+}

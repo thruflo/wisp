@@ -12,8 +12,10 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"log"
 	"net"
 	"net/http"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -48,6 +50,9 @@ type Server struct {
 	// CORS configuration
 	corsOrigins map[string]bool // Allowed origins for CORS. nil means default (localhost only).
 
+	// Rate limiting for authentication
+	authRateLimiter *rateLimiter
+
 	// Static assets filesystem
 	assets fs.FS
 
@@ -63,6 +68,9 @@ type Config struct {
 
 	// CORS configuration
 	CORSOrigins []string // Allowed CORS origins. If empty, defaults to localhost only.
+
+	// Rate limiting configuration for authentication
+	RateLimitConfig *RateLimitConfig // Optional: if nil, uses default rate limiting
 
 	// Relay mode configuration
 	SpriteURL       string // URL of the Sprite stream server (e.g., "http://localhost:8374")
@@ -101,13 +109,20 @@ func NewServer(cfg *Config) (*Server, error) {
 	// Build CORS origins map
 	corsOrigins := buildCORSOriginsMap(cfg.CORSOrigins)
 
+	// Initialize rate limiter for authentication
+	rateLimitConfig := DefaultRateLimitConfig()
+	if cfg.RateLimitConfig != nil {
+		rateLimitConfig = *cfg.RateLimitConfig
+	}
+
 	return &Server{
-		port:         cfg.Port,
-		passwordHash: cfg.PasswordHash,
-		tokens:       make(map[string]time.Time),
-		streams:      streams,
-		corsOrigins:  corsOrigins,
-		assets:       assets,
+		port:            cfg.Port,
+		passwordHash:    cfg.PasswordHash,
+		tokens:          make(map[string]time.Time),
+		streams:         streams,
+		corsOrigins:     corsOrigins,
+		authRateLimiter: newRateLimiter(rateLimitConfig),
+		assets:          assets,
 	}, nil
 }
 
@@ -170,6 +185,9 @@ func (s *Server) Start(ctx context.Context) error {
 
 	// Start cleanup goroutine for expired tokens
 	go s.cleanupExpiredTokens(ctx)
+
+	// Start cleanup goroutine for rate limiter
+	go s.cleanupRateLimiter(ctx)
 
 	// Run server (blocks until error or server closed)
 	err = s.server.Serve(listener)
@@ -354,6 +372,21 @@ func (s *Server) cleanupExpiredTokens(ctx context.Context) {
 				}
 			}
 			s.mu.Unlock()
+		}
+	}
+}
+
+// cleanupRateLimiter periodically removes expired rate limit entries.
+func (s *Server) cleanupRateLimiter(ctx context.Context) {
+	ticker := time.NewTicker(5 * time.Minute)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			s.authRateLimiter.cleanup()
 		}
 	}
 }
@@ -945,9 +978,31 @@ func isAlphanumeric(s string) bool {
 }
 
 // handleAuth handles POST /auth for password authentication.
+// Rate limited to prevent brute force attacks.
 func (s *Server) handleAuth(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	// Extract client IP for rate limiting
+	clientIP := extractIP(r)
+
+	// Check rate limit before processing
+	result := s.authRateLimiter.check(clientIP)
+	if !result.Allowed {
+		// Log rate-limited request
+		log.Print(result.AttemptsLog)
+
+		// Set Retry-After header
+		retrySeconds := int(result.RetryAfter.Seconds())
+		if retrySeconds < 1 {
+			retrySeconds = 1
+		}
+		w.Header().Set("Retry-After", strconv.Itoa(retrySeconds))
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusTooManyRequests)
+		fmt.Fprintf(w, `{"error":"%s","retry_after":%d}`, result.Reason, retrySeconds)
 		return
 	}
 
@@ -980,9 +1035,15 @@ func (s *Server) handleAuth(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if !valid {
+		// Record failed attempt for exponential backoff
+		s.authRateLimiter.recordFailure(clientIP)
+		log.Printf("auth: failed ip=%s", clientIP)
 		http.Error(w, "invalid password", http.StatusUnauthorized)
 		return
 	}
+
+	// Record successful authentication, reset failure counter
+	s.authRateLimiter.recordSuccess(clientIP)
 
 	// Generate token
 	token, err := s.GenerateToken()
