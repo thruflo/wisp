@@ -9,15 +9,65 @@ runs Claude until completion or blockage, produces a PR.
 ## Project structure
 
 ```
-cmd/wisp/           # main entry point
+cmd/
+  wisp/             # main CLI entry point
+  wisp-sprite/      # binary that runs on Sprite VM
 internal/
   cli/              # command implementations
   config/           # configuration loading
-  session/          # session management
+  loop/             # orchestration-only loop (manages Sprite lifecycle)
+  server/           # web server for browser-based UI
+  spriteloop/       # iteration loop running on Sprite VM
   sprite/           # Sprite client wrapper
   state/            # state file handling
+  stream/           # durable stream types and client
   tui/              # terminal UI
 pkg/                # public API (if any)
+```
+
+## Durable stream architecture
+
+Wisp uses a durable stream architecture to ensure Claude output is never lost
+during network disconnections. The key components are:
+
+### Stream package (`internal/stream`)
+
+- `types.go` - Event types: session, task, claude_event, input_request, command, ack
+- `filestore.go` - FileStore for persisting events as NDJSON on Sprite
+- `client.go` - StreamClient for HTTP/SSE-based event consumption
+
+### Spriteloop package (`internal/spriteloop`)
+
+Runs on the Sprite VM via the `wisp-sprite` binary:
+
+- `loop.go` - Core iteration logic (previously in internal/loop)
+- `claude.go` - Claude process execution and output streaming
+- `commands.go` - Command processing (kill, background, input_response)
+- `server.go` - HTTP server exposing /stream, /command, /state endpoints
+
+### Event flow
+
+```
+[Sprite VM]                              [Client]
+Claude process                           TUI / Web
+     ↓ output
+FileStore.Append()                       StreamClient.Subscribe()
+     ↓ writes                                 ↑ reads
+stream.ndjson ←─────────── SSE ──────────────┘
+```
+
+### Message types
+
+```go
+// Sprite → Client
+MessageTypeSession      // session state update
+MessageTypeTask         // task state update
+MessageTypeClaudeEvent  // Claude output event
+MessageTypeInputRequest // request for user input
+MessageTypeAck          // command acknowledgment
+
+// Client → Sprite
+MessageTypeCommand      // kill, background, input_response
 ```
 
 ## Go conventions
@@ -82,6 +132,18 @@ When you build:
 - always use `go install ./cmd/wisp`
 - never use `go build -o wisp ./cmd/wisp`
 
+### Cross-compiling wisp-sprite
+
+The `wisp-sprite` binary runs on Sprite VMs (Linux/amd64). Build with:
+
+```bash
+make build-sprite
+# or manually:
+CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o bin/wisp-sprite ./cmd/wisp-sprite
+```
+
+The binary is statically linked (no CGO) to run in the minimal Sprite environment.
+
 ## Testing
 
 - Table-driven tests
@@ -114,7 +176,7 @@ func TestParseState(t *testing.T) {
 }
 ```
 
-Integration tests in `integration_test.go` with build tag:
+Integration tests in `internal/integration/` with build tag:
 
 ```go
 //go:build integration
@@ -122,7 +184,10 @@ Integration tests in `integration_test.go` with build tag:
 func TestFullWorkflow(t *testing.T) { ... }
 ```
 
-Run with: `go test -tags=integration ./...`
+Run with: `go test -tags=integration ./internal/integration/...`
+
+Key integration tests:
+- `stream_reconnect_test.go` - Tests disconnect/reconnect scenarios for durable streams
 
 IMPORTANT: When you run integration tests that could hang, make sure you use tight timeouts.
 

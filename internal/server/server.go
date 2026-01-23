@@ -12,8 +12,10 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"log"
 	"net"
 	"net/http"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -41,9 +43,15 @@ type Server struct {
 	streams *StreamManager
 
 	// Input handling
-	inputMu          sync.Mutex
-	pendingInputs    map[string]string // request_id -> response
-	respondedInputs  map[string]bool   // request_id -> true if already responded
+	inputMu         sync.Mutex
+	pendingInputs   map[string]string // request_id -> response
+	respondedInputs map[string]bool   // request_id -> true if already responded
+
+	// CORS configuration
+	corsOrigins map[string]bool // Allowed origins for CORS. nil means default (localhost only).
+
+	// Rate limiting for authentication
+	authRateLimiter *rateLimiter
 
 	// Static assets filesystem
 	assets fs.FS
@@ -57,9 +65,21 @@ type Config struct {
 	Port         int
 	PasswordHash string
 	Assets       fs.FS // Optional: static assets filesystem. If nil, uses embedded assets.
+
+	// CORS configuration
+	CORSOrigins []string // Allowed CORS origins. If empty, defaults to localhost only.
+
+	// Rate limiting configuration for authentication
+	RateLimitConfig *RateLimitConfig // Optional: if nil, uses default rate limiting
+
+	// Relay mode configuration
+	SpriteURL       string // URL of the Sprite stream server (e.g., "http://localhost:8374")
+	SpriteAuthToken string // Optional authentication token for Sprite connection
 }
 
 // NewServer creates a new Server instance.
+// If SpriteURL is configured, the server operates in relay mode,
+// forwarding events from the Sprite to web clients.
 func NewServer(cfg *Config) (*Server, error) {
 	if cfg == nil {
 		return nil, errors.New("config is required")
@@ -68,7 +88,14 @@ func NewServer(cfg *Config) (*Server, error) {
 		return nil, errors.New("password hash is required")
 	}
 
-	streams, err := NewStreamManager()
+	// Create stream manager - either local or relay mode
+	var streams *StreamManager
+	var err error
+	if cfg.SpriteURL != "" {
+		streams, err = NewRelayStreamManager(cfg.SpriteURL, cfg.SpriteAuthToken)
+	} else {
+		streams, err = NewStreamManager()
+	}
 	if err != nil {
 		return nil, fmt.Errorf("failed to create stream manager: %w", err)
 	}
@@ -79,12 +106,23 @@ func NewServer(cfg *Config) (*Server, error) {
 		assets = web.GetAssets("")
 	}
 
+	// Build CORS origins map
+	corsOrigins := buildCORSOriginsMap(cfg.CORSOrigins)
+
+	// Initialize rate limiter for authentication
+	rateLimitConfig := DefaultRateLimitConfig()
+	if cfg.RateLimitConfig != nil {
+		rateLimitConfig = *cfg.RateLimitConfig
+	}
+
 	return &Server{
-		port:         cfg.Port,
-		passwordHash: cfg.PasswordHash,
-		tokens:       make(map[string]time.Time),
-		streams:      streams,
-		assets:       assets,
+		port:            cfg.Port,
+		passwordHash:    cfg.PasswordHash,
+		tokens:          make(map[string]time.Time),
+		streams:         streams,
+		corsOrigins:     corsOrigins,
+		authRateLimiter: newRateLimiter(rateLimitConfig),
+		assets:          assets,
 	}, nil
 }
 
@@ -96,6 +134,7 @@ func NewServerFromConfig(cfg *config.ServerConfig) (*Server, error) {
 	return NewServer(&Config{
 		Port:         cfg.Port,
 		PasswordHash: cfg.PasswordHash,
+		CORSOrigins:  cfg.CORSOrigins,
 	})
 }
 
@@ -106,11 +145,20 @@ func (s *Server) Port() int {
 
 // Start starts the HTTP server.
 // The server runs until ctx is cancelled or Stop is called.
+// If in relay mode, also starts the relay from the Sprite.
 func (s *Server) Start(ctx context.Context) error {
 	s.mu.Lock()
 	if s.started {
 		s.mu.Unlock()
 		return errors.New("server already started")
+	}
+
+	// Start relay if in relay mode
+	if s.streams.IsRelayMode() {
+		if err := s.streams.StartRelay(ctx); err != nil {
+			s.mu.Unlock()
+			return fmt.Errorf("failed to start relay: %w", err)
+		}
 	}
 
 	// Create listener
@@ -137,6 +185,9 @@ func (s *Server) Start(ctx context.Context) error {
 
 	// Start cleanup goroutine for expired tokens
 	go s.cleanupExpiredTokens(ctx)
+
+	// Start cleanup goroutine for rate limiter
+	go s.cleanupRateLimiter(ctx)
 
 	// Run server (blocks until error or server closed)
 	err = s.server.Serve(listener)
@@ -192,13 +243,38 @@ func (s *Server) ListenAddr() string {
 
 // setupRoutes configures the HTTP routes.
 func (s *Server) setupRoutes(mux *http.ServeMux) {
-	// Public endpoint
-	mux.HandleFunc("/auth", s.handleAuth)
+	// Public endpoint with CORS preflight support
+	mux.HandleFunc("/auth", s.withCORS(s.handleAuth))
 
-	// Protected endpoints
-	mux.HandleFunc("/stream", s.withAuth(s.handleStream))
-	mux.HandleFunc("/input", s.withAuth(s.handleInput))
+	// Protected endpoints with CORS preflight support
+	mux.HandleFunc("/stream", s.withCORS(s.withAuth(s.handleStream)))
+	mux.HandleFunc("/input", s.withCORS(s.withAuth(s.handleInput)))
 	mux.HandleFunc("/", s.handleStatic) // Static assets are public for initial page load
+}
+
+// withCORS wraps a handler with CORS support including preflight handling.
+func (s *Server) withCORS(handler http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		// Handle preflight OPTIONS requests
+		if r.Method == http.MethodOptions {
+			s.handlePreflight(w, r)
+			return
+		}
+
+		// Set CORS headers for actual requests
+		origin := r.Header.Get("Origin")
+		if origin != "" {
+			if !s.isOriginAllowed(origin) {
+				http.Error(w, "origin not allowed", http.StatusForbidden)
+				return
+			}
+			w.Header().Set("Access-Control-Allow-Origin", origin)
+			w.Header().Set("Access-Control-Allow-Credentials", "true")
+			w.Header().Set("Vary", "Origin")
+		}
+
+		handler(w, r)
+	}
 }
 
 // withAuth wraps a handler with authentication middleware.
@@ -300,6 +376,86 @@ func (s *Server) cleanupExpiredTokens(ctx context.Context) {
 	}
 }
 
+// cleanupRateLimiter periodically removes expired rate limit entries.
+func (s *Server) cleanupRateLimiter(ctx context.Context) {
+	ticker := time.NewTicker(5 * time.Minute)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			s.authRateLimiter.cleanup()
+		}
+	}
+}
+
+// Default CORS origins (localhost for development)
+var defaultCORSOrigins = []string{
+	"http://localhost:3000",
+	"http://localhost:5173",
+	"http://127.0.0.1:3000",
+	"http://127.0.0.1:5173",
+}
+
+// buildCORSOriginsMap creates a map of allowed origins for fast lookup.
+// If the input list is empty, returns default localhost origins.
+func buildCORSOriginsMap(origins []string) map[string]bool {
+	if len(origins) == 0 {
+		origins = defaultCORSOrigins
+	}
+	m := make(map[string]bool, len(origins))
+	for _, o := range origins {
+		m[o] = true
+	}
+	return m
+}
+
+// isOriginAllowed checks if the request origin is in the allowed list.
+func (s *Server) isOriginAllowed(origin string) bool {
+	if origin == "" {
+		return false
+	}
+	return s.corsOrigins[origin]
+}
+
+// setCORSHeaders sets CORS headers if the origin is allowed.
+// Returns true if the origin was allowed.
+func (s *Server) setCORSHeaders(w http.ResponseWriter, r *http.Request) bool {
+	origin := r.Header.Get("Origin")
+	if origin == "" {
+		// Not a CORS request
+		return true
+	}
+
+	if !s.isOriginAllowed(origin) {
+		return false
+	}
+
+	w.Header().Set("Access-Control-Allow-Origin", origin)
+	w.Header().Set("Access-Control-Allow-Credentials", "true")
+	w.Header().Set("Vary", "Origin")
+	return true
+}
+
+// handlePreflight handles CORS preflight OPTIONS requests.
+func (s *Server) handlePreflight(w http.ResponseWriter, r *http.Request) {
+	origin := r.Header.Get("Origin")
+	if origin == "" || !s.isOriginAllowed(origin) {
+		http.Error(w, "origin not allowed", http.StatusForbidden)
+		return
+	}
+
+	w.Header().Set("Access-Control-Allow-Origin", origin)
+	w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+	w.Header().Set("Access-Control-Allow-Headers", "Authorization, Content-Type")
+	w.Header().Set("Access-Control-Allow-Credentials", "true")
+	w.Header().Set("Access-Control-Max-Age", "86400") // 24 hours
+	w.Header().Set("Vary", "Origin")
+	w.WriteHeader(http.StatusNoContent)
+}
+
 // Protocol header names for Durable Streams
 const (
 	headerStreamNextOffset = "Stream-Next-Offset"
@@ -315,8 +471,7 @@ func (s *Server) handleStream(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Set CORS headers
-	w.Header().Set("Access-Control-Allow-Origin", "*")
+	// Expose stream-specific headers
 	w.Header().Set("Access-Control-Expose-Headers", "Stream-Next-Offset, Stream-Up-To-Date, Stream-Cursor")
 
 	// Get stream path
@@ -503,8 +658,9 @@ func formatJSONResponse(messages []store.Message) []byte {
 }
 
 // handleInput handles POST /input for user responses.
-// Implements first-response-wins: if the request has already been responded to
-// (either from web or TUI), subsequent responses are rejected.
+// In relay mode, the input is forwarded to the Sprite.
+// In local mode, implements first-response-wins: if the request has already
+// been responded to (either from web or TUI), subsequent responses are rejected.
 func (s *Server) handleInput(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -532,40 +688,55 @@ func (s *Server) handleInput(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Use inputMu for input-specific operations (first-response-wins)
-	s.inputMu.Lock()
-
-	// Check if this request has already been responded to
-	if s.respondedInputs != nil && s.respondedInputs[req.RequestID] {
-		s.inputMu.Unlock()
+	// In relay mode, forward the input to the Sprite
+	if s.streams != nil && s.streams.IsRelayMode() {
+		commandID := fmt.Sprintf("web-input-%s-%d", req.RequestID, time.Now().UnixNano())
+		ack, err := s.streams.SendInputResponseToSprite(r.Context(), commandID, req.RequestID, req.Response)
+		if err != nil {
+			http.Error(w, fmt.Sprintf("failed to send input to sprite: %v", err), http.StatusBadGateway)
+			return
+		}
+		if ack.Status == "error" {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusConflict)
+			fmt.Fprintf(w, `{"status":"error","error":%q}`, ack.Error)
+			return
+		}
 		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusConflict)
-		fmt.Fprintf(w, `{"status":"already_responded"}`)
+		w.WriteHeader(http.StatusOK)
+		fmt.Fprintf(w, `{"status":"received"}`)
 		return
 	}
 
-	// Initialize maps if needed
-	if s.pendingInputs == nil {
-		s.pendingInputs = make(map[string]string)
-	}
-	if s.respondedInputs == nil {
-		s.respondedInputs = make(map[string]bool)
-	}
-
-	// Mark as responded and store the response
-	s.respondedInputs[req.RequestID] = true
-	s.pendingInputs[req.RequestID] = req.Response
-	s.inputMu.Unlock()
-
-	// Broadcast that this input request has been responded to
-	// This allows web clients to see the updated state immediately
+	// Local mode: use StreamManager for state tracking (State Protocol bidirectional sync)
+	// This replaces the previous in-memory pendingInputs/respondedInputs maps
 	if s.streams != nil {
-		inputReq := &InputRequest{
-			ID:        req.RequestID,
-			Responded: true,
-			Response:  &req.Response,
+		// Use StreamManager for input state - first response wins
+		if !s.streams.HandleInputResponse(req.RequestID, req.Response) {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusConflict)
+			fmt.Fprintf(w, `{"status":"already_responded"}`)
+			return
 		}
-		s.streams.BroadcastInputRequest(inputReq)
+	} else {
+		// Fallback to in-memory maps if no StreamManager (shouldn't happen in practice)
+		s.inputMu.Lock()
+		if s.respondedInputs != nil && s.respondedInputs[req.RequestID] {
+			s.inputMu.Unlock()
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusConflict)
+			fmt.Fprintf(w, `{"status":"already_responded"}`)
+			return
+		}
+		if s.pendingInputs == nil {
+			s.pendingInputs = make(map[string]string)
+		}
+		if s.respondedInputs == nil {
+			s.respondedInputs = make(map[string]bool)
+		}
+		s.respondedInputs[req.RequestID] = true
+		s.pendingInputs[req.RequestID] = req.Response
+		s.inputMu.Unlock()
 	}
 
 	// Return success
@@ -574,9 +745,16 @@ func (s *Server) handleInput(w http.ResponseWriter, r *http.Request) {
 	fmt.Fprintf(w, `{"status":"received"}`)
 }
 
-// GetPendingInput retrieves and removes a pending input response.
-// This is called by the loop when polling for web client input.
+// GetPendingInput retrieves a pending input response.
+// This is called by the loop to check for web client input.
+// Per State Protocol, input state is tracked via stream events.
 func (s *Server) GetPendingInput(requestID string) (string, bool) {
+	// Try StreamManager first (State Protocol bidirectional sync)
+	if s.streams != nil {
+		return s.streams.GetInputResponse(requestID)
+	}
+
+	// Fallback to in-memory maps
 	s.inputMu.Lock()
 	defer s.inputMu.Unlock()
 	if s.pendingInputs == nil {
@@ -592,7 +770,17 @@ func (s *Server) GetPendingInput(requestID string) (string, bool) {
 // MarkInputResponded marks an input request as responded.
 // This is called by the loop when the TUI provides input, to prevent
 // subsequent web client responses from being accepted.
+// Per State Protocol, this is now handled via stream events when possible.
 func (s *Server) MarkInputResponded(requestID string) {
+	// Try StreamManager first (State Protocol bidirectional sync)
+	// We use an empty response since we just want to mark it as responded
+	if s.streams != nil {
+		// Mark as responded with empty response (TUI provided real response elsewhere)
+		s.streams.HandleInputResponse(requestID, "")
+		return
+	}
+
+	// Fallback to in-memory maps
 	s.inputMu.Lock()
 	defer s.inputMu.Unlock()
 	if s.respondedInputs == nil {
@@ -602,7 +790,14 @@ func (s *Server) MarkInputResponded(requestID string) {
 }
 
 // IsInputResponded checks if an input request has already been responded to.
+// Per State Protocol, input state is tracked via stream events.
 func (s *Server) IsInputResponded(requestID string) bool {
+	// Try StreamManager first (State Protocol bidirectional sync)
+	if s.streams != nil {
+		return s.streams.IsInputResponded(requestID)
+	}
+
+	// Fallback to in-memory maps
 	s.inputMu.Lock()
 	defer s.inputMu.Unlock()
 	if s.respondedInputs == nil {
@@ -783,9 +978,31 @@ func isAlphanumeric(s string) bool {
 }
 
 // handleAuth handles POST /auth for password authentication.
+// Rate limited to prevent brute force attacks.
 func (s *Server) handleAuth(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	// Extract client IP for rate limiting
+	clientIP := extractIP(r)
+
+	// Check rate limit before processing
+	result := s.authRateLimiter.check(clientIP)
+	if !result.Allowed {
+		// Log rate-limited request
+		log.Print(result.AttemptsLog)
+
+		// Set Retry-After header
+		retrySeconds := int(result.RetryAfter.Seconds())
+		if retrySeconds < 1 {
+			retrySeconds = 1
+		}
+		w.Header().Set("Retry-After", strconv.Itoa(retrySeconds))
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusTooManyRequests)
+		fmt.Fprintf(w, `{"error":"%s","retry_after":%d}`, result.Reason, retrySeconds)
 		return
 	}
 
@@ -818,9 +1035,15 @@ func (s *Server) handleAuth(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if !valid {
+		// Record failed attempt for exponential backoff
+		s.authRateLimiter.recordFailure(clientIP)
+		log.Printf("auth: failed ip=%s", clientIP)
 		http.Error(w, "invalid password", http.StatusUnauthorized)
 		return
 	}
+
+	// Record successful authentication, reset failure counter
+	s.authRateLimiter.recordSuccess(clientIP)
 
 	// Generate token
 	token, err := s.GenerateToken()

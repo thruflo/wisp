@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net/http"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -11,39 +12,59 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
-	"github.com/thruflo/wisp/internal/auth"
 	"github.com/thruflo/wisp/internal/config"
+	"github.com/thruflo/wisp/internal/logging"
 	"github.com/thruflo/wisp/internal/loop"
 	"github.com/thruflo/wisp/internal/server"
 	"github.com/thruflo/wisp/internal/sprite"
 	"github.com/thruflo/wisp/internal/state"
+	"github.com/thruflo/wisp/internal/stream"
 	"github.com/thruflo/wisp/internal/tui"
 )
 
 var (
-	startRepo         string
-	startSpec         string
-	startSiblingRepo  []string
-	startBranch       string
-	startTemplate     string
-	startCheckpoint   string
-	startHeadless     bool
-	startContinue     bool
-	startServer       bool
-	startServerPort   int
-	startSetPassword  bool
+	startRepo        string
+	startSpec        string
+	startSiblingRepo []string
+	startBranch      string
+	startTemplate    string
+	startCheckpoint  string
+	startHeadless    bool
+	startContinue    bool
+	startServer      bool
+	startServerPort  int
+	startSetPassword bool
+)
+
+// SpriteRunner paths and settings.
+const (
+	// SpriteRunnerPort is the HTTP port wisp-sprite listens on.
+	SpriteRunnerPort = 8374
+
+	// SpriteRunnerBinaryPath is the path where the wisp-sprite binary is uploaded on the Sprite.
+	SpriteRunnerBinaryPath = "/var/local/wisp/bin/wisp-sprite"
+
+	// SpriteRunnerPIDPath is the path to the PID file for the running wisp-sprite process.
+	SpriteRunnerPIDPath = "/var/local/wisp/wisp-sprite.pid"
+
+	// SpriteRunnerLogPath is the path to the log file for wisp-sprite output.
+	SpriteRunnerLogPath = "/var/local/wisp/wisp-sprite.log"
+
+	// LocalSpriteRunnerPath is the path to the local wisp-sprite binary to upload.
+	// This is built by `make build-sprite`.
+	LocalSpriteRunnerPath = "bin/wisp-sprite"
 )
 
 // HeadlessResult is the JSON output format for headless mode.
 // It contains the loop result and session information for testing/CI.
 type HeadlessResult struct {
-	Reason     string `json:"reason"`               // Exit reason (e.g., "completed", "max iterations")
-	Iterations int    `json:"iterations"`           // Number of iterations run
-	Branch     string `json:"branch"`               // Session branch name
-	SpriteName string `json:"sprite_name"`          // Sprite name
-	Error      string `json:"error,omitempty"`      // Error message if any
-	Status     string `json:"status,omitempty"`     // Final state status (DONE, CONTINUE, etc.)
-	Summary    string `json:"summary,omitempty"`    // Final state summary
+	Reason     string `json:"reason"`            // Exit reason (e.g., "completed", "max iterations")
+	Iterations int    `json:"iterations"`        // Number of iterations run
+	Branch     string `json:"branch"`            // Session branch name
+	SpriteName string `json:"sprite_name"`       // Sprite name
+	Error      string `json:"error,omitempty"`   // Error message if any
+	Status     string `json:"status,omitempty"`  // Final state status (DONE, CONTINUE, etc.)
+	Summary    string `json:"summary,omitempty"` // Final state summary
 }
 
 var startCmd = &cobra.Command{
@@ -119,7 +140,7 @@ func runStart(cmd *cobra.Command, args []string) error {
 
 	// Handle server mode and password setup
 	if startServer || startSetPassword {
-		if err := handleServerPassword(cwd, cfg, startServer, startSetPassword, startServerPort); err != nil {
+		if err := HandleServerPassword(cwd, cfg, startServer, startSetPassword, startServerPort); err != nil {
 			return err
 		}
 	}
@@ -220,6 +241,7 @@ func runStart(cmd *cobra.Command, args []string) error {
 	if err := syncMgr.SyncFromSprite(ctx, spriteName, branch); err != nil {
 		// Non-fatal, tasks might not exist yet
 		fmt.Printf("Warning: failed to sync initial state: %v\n", err)
+		logging.Warn("failed to sync initial state from sprite", "error", err, "sprite", spriteName, "branch", branch)
 	}
 
 	// Get template directory
@@ -262,6 +284,7 @@ func runStart(cmd *cobra.Command, args []string) error {
 		defer func() {
 			if err := srv.Stop(); err != nil {
 				fmt.Printf("Warning: failed to stop web server: %v\n", err)
+				logging.Warn("failed to stop web server", "error", err, "port", startServerPort)
 			}
 		}()
 	}
@@ -310,6 +333,7 @@ func runStart(cmd *cobra.Command, args []string) error {
 		s.Status = finalStatus
 	}); err != nil {
 		fmt.Printf("Warning: failed to update session status: %v\n", err)
+		logging.Warn("failed to update session status", "error", err, "branch", branch, "status", finalStatus)
 	}
 
 	// Print result
@@ -437,146 +461,16 @@ func SetupSprite(
 	env map[string]string,
 	localBasePath string,
 ) (string, error) {
-	// Parse repo org/name (needed for repo path)
-	parts := strings.Split(session.Repo, "/")
-	if len(parts) != 2 {
-		return "", fmt.Errorf("invalid repo format %q, expected org/repo", session.Repo)
-	}
-	org, repo := parts[0], parts[1]
-	// Clone to /var/local/wisp/repos/{org}/{repo}
-	repoPath := filepath.Join(sprite.ReposDir, org, repo)
-
-	// Check if sprite already exists
-	exists, err := client.Exists(ctx, session.SpriteName)
-	if err != nil {
-		return "", fmt.Errorf("failed to check sprite existence: %w", err)
-	}
-
-	if exists {
-		// Sprite exists - check if it's healthy by verifying repo path exists
-		fmt.Printf("Found existing Sprite %s, checking health...\n", session.SpriteName)
-
-		// Check if repo directory exists on sprite
-		_, _, exitCode, err := client.ExecuteOutput(ctx, session.SpriteName, "", nil, "test", "-d", repoPath)
-		if err == nil && exitCode == 0 {
-			// Repo exists - sprite is healthy, reuse it
-			fmt.Printf("Sprite is healthy, resuming on existing Sprite...\n")
-			return repoPath, nil
-		}
-
-		// Repo doesn't exist or check failed - sprite is broken, delete and recreate
-		fmt.Printf("Sprite appears broken, recreating...\n")
-		if err := client.Delete(ctx, session.SpriteName); err != nil {
-			return "", fmt.Errorf("failed to delete broken sprite: %w", err)
-		}
-	}
-
-	// Create Sprite
-	fmt.Printf("Creating Sprite %s...\n", session.SpriteName)
-	if err := client.Create(ctx, session.SpriteName, session.Checkpoint); err != nil {
-		return "", fmt.Errorf("failed to create sprite: %w", err)
-	}
-
-	// Create directory structure: /var/local/wisp/{session,templates,repos}
-	fmt.Printf("Creating directories...\n")
-	if err := syncMgr.EnsureDirectoriesOnSprite(ctx, session.SpriteName); err != nil {
-		return "", fmt.Errorf("failed to create directories: %w", err)
-	}
-
-	// Get GitHub token for cloning
-	githubToken := env["GITHUB_TOKEN"]
-	if githubToken == "" {
-		githubToken = os.Getenv("GITHUB_TOKEN")
-	}
-
-	// Setup git config
-	fmt.Printf("Setting up git config...\n")
-	if err := sprite.SetupGitConfig(ctx, client, session.SpriteName); err != nil {
-		return "", fmt.Errorf("failed to setup git config: %w", err)
-	}
-
-	// Clone primary repo (token embedded in URL for auth)
-	fmt.Printf("Cloning %s...\n", session.Repo)
-	if err := CloneRepo(ctx, client, session.SpriteName, session.Repo, repoPath, githubToken, ""); err != nil {
-		return "", fmt.Errorf("failed to clone repo: %w", err)
-	}
-
-	// Handle branch checkout based on session mode
-	if session.Continue {
-		// Continue mode: fetch and checkout existing branch
-		fmt.Printf("Fetching and checking out existing branch %s...\n", session.Branch)
-		if err := fetchAndCheckoutBranch(ctx, client, session.SpriteName, repoPath, session.Branch); err != nil {
-			return "", fmt.Errorf("failed to checkout existing branch: %w", err)
-		}
-	} else if session.Ref != "" {
-		// Ref mode: checkout base ref, then create new branch from it
-		fmt.Printf("Checking out base ref %s...\n", session.Ref)
-		if err := checkoutRef(ctx, client, session.SpriteName, repoPath, session.Ref); err != nil {
-			return "", fmt.Errorf("failed to checkout ref: %w", err)
-		}
-		fmt.Printf("Creating branch %s...\n", session.Branch)
-		if err := CreateBranch(ctx, client, session.SpriteName, repoPath, session.Branch); err != nil {
-			return "", fmt.Errorf("failed to create branch: %w", err)
-		}
-	} else {
-		// Default mode: create new branch from default branch
-		fmt.Printf("Creating branch %s...\n", session.Branch)
-		if err := CreateBranch(ctx, client, session.SpriteName, repoPath, session.Branch); err != nil {
-			return "", fmt.Errorf("failed to create branch: %w", err)
-		}
-	}
-
-	// Copy spec file from local to Sprite
-	fmt.Printf("Copying spec file %s...\n", session.Spec)
-	if err := CopySpecFile(ctx, client, session.SpriteName, localBasePath, session.Spec); err != nil {
-		return "", fmt.Errorf("failed to copy spec file: %w", err)
-	}
-
-	// Clone sibling repos (with optional ref checkout)
-	for _, sibling := range session.Siblings {
-		siblingParts := strings.Split(sibling.Repo, "/")
-		if len(siblingParts) != 2 {
-			return "", fmt.Errorf("invalid sibling repo format %q, expected org/repo", sibling.Repo)
-		}
-		siblingOrg, siblingRepo := siblingParts[0], siblingParts[1]
-		siblingPath := filepath.Join(sprite.ReposDir, siblingOrg, siblingRepo)
-
-		if sibling.Ref != "" {
-			fmt.Printf("Cloning sibling %s@%s...\n", sibling.Repo, sibling.Ref)
-		} else {
-			fmt.Printf("Cloning sibling %s...\n", sibling.Repo)
-		}
-		if err := CloneRepo(ctx, client, session.SpriteName, sibling.Repo, siblingPath, githubToken, sibling.Ref); err != nil {
-			return "", fmt.Errorf("failed to clone sibling %s: %w", sibling.Repo, err)
-		}
-	}
-
-	// Copy settings.json to ~/.claude/settings.json
-	fmt.Printf("Copying settings...\n")
-	if err := syncMgr.CopySettingsToSprite(ctx, session.SpriteName, settings); err != nil {
-		return "", fmt.Errorf("failed to copy settings: %w", err)
-	}
-
-	// Copy templates to /var/local/wisp/templates/
-	templateDir := filepath.Join(localBasePath, ".wisp", "templates", "default")
-	fmt.Printf("Copying templates...\n")
-	if err := syncMgr.CopyTemplatesToSprite(ctx, session.SpriteName, templateDir); err != nil {
-		return "", fmt.Errorf("failed to copy templates: %w", err)
-	}
-
-	// Inject environment variables by writing them to Sprite
-	fmt.Printf("Injecting environment...\n")
-	if err := InjectEnvVars(ctx, client, session.SpriteName, env); err != nil {
-		return "", fmt.Errorf("failed to inject env vars: %w", err)
-	}
-
-	// Copy Claude credentials for Claude Max authentication
-	fmt.Printf("Copying Claude credentials...\n")
-	if err := sprite.CopyClaudeCredentials(ctx, client, session.SpriteName); err != nil {
-		return "", fmt.Errorf("failed to copy Claude credentials: %w", err)
-	}
-
-	return repoPath, nil
+	return SetupSpriteWithConfig(ctx, SpriteSetupConfig{
+		Mode:          SpriteSetupModeStart,
+		Client:        client,
+		SyncManager:   syncMgr,
+		Session:       session,
+		Settings:      settings,
+		Env:           env,
+		LocalBasePath: localBasePath,
+		TemplateName:  "default",
+	})
 }
 
 // CloneRepo clones a GitHub repository to the specified path on a Sprite.
@@ -743,48 +637,172 @@ func RunCreateTasksPrompt(ctx context.Context, client sprite.Client, session *co
 		createTasksPath, "RFC path: "+RemoteSpecPath, contextPath, 50)
 }
 
-// handleServerPassword handles password setup for the web server.
-// It prompts for a password if needed and saves the hash to config.
-func handleServerPassword(basePath string, cfg *config.Config, serverEnabled, setPassword bool, port int) error {
-	// Initialize server config if not present
-	if cfg.Server == nil {
-		cfg.Server = config.DefaultServerConfig()
+// UploadSpriteRunner uploads the wisp-sprite binary to the Sprite.
+// The binary must have been built with `make build-sprite` prior to calling this.
+// The binary is uploaded to /var/local/wisp/bin/wisp-sprite and made executable.
+// localBasePath should be the base path for the local wisp installation (where .wisp/ is located).
+func UploadSpriteRunner(ctx context.Context, client sprite.Client, spriteName, localBasePath string) error {
+	// Read local binary
+	binaryPath := filepath.Join(localBasePath, LocalSpriteRunnerPath)
+	content, err := os.ReadFile(binaryPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return fmt.Errorf("wisp-sprite binary not found at %s - run 'make build-sprite' first", binaryPath)
+		}
+		return fmt.Errorf("failed to read wisp-sprite binary: %w", err)
 	}
 
-	// Update port from flag
-	cfg.Server.Port = port
-
-	// Check if we need to prompt for password
-	needsPassword := false
-
-	if setPassword {
-		// User explicitly wants to set/change password
-		needsPassword = true
-	} else if serverEnabled && cfg.Server.PasswordHash == "" {
-		// Server mode enabled but no password configured
-		needsPassword = true
+	// Ensure parent directory exists
+	binDir := filepath.Dir(SpriteRunnerBinaryPath)
+	_, _, exitCode, err := client.ExecuteOutput(ctx, spriteName, "", nil, "mkdir", "-p", binDir)
+	if err != nil {
+		return fmt.Errorf("failed to create bin directory: %w", err)
+	}
+	if exitCode != 0 {
+		return fmt.Errorf("mkdir failed with exit code %d", exitCode)
 	}
 
-	if needsPassword {
-		password, err := auth.PromptAndConfirmPassword()
-		if err != nil {
-			return fmt.Errorf("password setup failed: %w", err)
-		}
+	// Write binary to Sprite
+	if err := client.WriteFile(ctx, spriteName, SpriteRunnerBinaryPath, content); err != nil {
+		return fmt.Errorf("failed to upload wisp-sprite binary: %w", err)
+	}
 
-		hash, err := auth.HashPassword(password)
-		if err != nil {
-			return fmt.Errorf("failed to hash password: %w", err)
-		}
-
-		cfg.Server.PasswordHash = hash
-
-		// Save the updated config
-		if err := config.SaveConfig(basePath, cfg); err != nil {
-			return fmt.Errorf("failed to save config: %w", err)
-		}
-
-		fmt.Println("Password saved to config.")
+	// Make binary executable
+	_, stderr, exitCode, err := client.ExecuteOutput(ctx, spriteName, "", nil, "chmod", "+x", SpriteRunnerBinaryPath)
+	if err != nil {
+		return fmt.Errorf("failed to make wisp-sprite executable: %w", err)
+	}
+	if exitCode != 0 {
+		return fmt.Errorf("chmod failed with exit code %d: %s", exitCode, string(stderr))
 	}
 
 	return nil
+}
+
+// StartSpriteRunner starts the wisp-sprite binary on the Sprite using nohup.
+// The process is started in the background and will survive SSH disconnection.
+// The session ID is passed via the -session-id flag.
+// token is an optional authentication token for the HTTP server.
+// repoPath is the working directory for Claude execution.
+func StartSpriteRunner(ctx context.Context, client sprite.Client, spriteName, sessionID, repoPath, token string) error {
+	// Check if wisp-sprite is already running by checking for PID file
+	_, _, exitCode, _ := client.ExecuteOutput(ctx, spriteName, "", nil, "test", "-f", SpriteRunnerPIDPath)
+	if exitCode == 0 {
+		// PID file exists - check if process is actually running
+		_, _, exitCode, _ := client.ExecuteOutput(ctx, spriteName, "", nil,
+			"sh", "-c", fmt.Sprintf("kill -0 $(cat %s) 2>/dev/null", SpriteRunnerPIDPath))
+		if exitCode == 0 {
+			// Process is still running, no need to start again
+			return nil
+		}
+		// Process not running, remove stale PID file
+		client.ExecuteOutput(ctx, spriteName, "", nil, "rm", "-f", SpriteRunnerPIDPath)
+	}
+
+	// Build command arguments
+	args := []string{
+		SpriteRunnerBinaryPath,
+		"-port", fmt.Sprintf("%d", SpriteRunnerPort),
+		"-session-id", sessionID,
+		"-work-dir", repoPath,
+	}
+	if token != "" {
+		args = append(args, "-token", token)
+	}
+
+	// Build the nohup command that:
+	// 1. Redirects stdout/stderr to log file
+	// 2. Writes PID to file
+	// 3. Runs in background
+	cmdStr := fmt.Sprintf(
+		"nohup %s > %s 2>&1 & echo $! > %s",
+		strings.Join(args, " "),
+		SpriteRunnerLogPath,
+		SpriteRunnerPIDPath,
+	)
+
+	_, stderr, exitCode, err := client.ExecuteOutput(ctx, spriteName, "", nil, "sh", "-c", cmdStr)
+	if err != nil {
+		return fmt.Errorf("failed to start wisp-sprite: %w", err)
+	}
+	if exitCode != 0 {
+		return fmt.Errorf("failed to start wisp-sprite (exit %d): %s", exitCode, string(stderr))
+	}
+
+	return nil
+}
+
+// WaitForSpriteRunner waits for the wisp-sprite HTTP server to become ready.
+// It polls the /health endpoint until it returns successfully or the timeout is reached.
+// Returns the URL of the stream server on success.
+func WaitForSpriteRunner(ctx context.Context, client sprite.Client, spriteName string, timeout time.Duration) (string, error) {
+	const pollInterval = 500 * time.Millisecond
+	deadline := time.Now().Add(timeout)
+
+	// Build the health check URL using the Sprite's internal IP
+	// We'll use curl from within the Sprite to check the local server
+	healthCheckCmd := fmt.Sprintf("curl -s -o /dev/null -w '%%{http_code}' http://localhost:%d/health", SpriteRunnerPort)
+
+	for time.Now().Before(deadline) {
+		select {
+		case <-ctx.Done():
+			return "", ctx.Err()
+		default:
+		}
+
+		stdout, _, exitCode, err := client.ExecuteOutput(ctx, spriteName, "", nil, "sh", "-c", healthCheckCmd)
+		if err == nil && exitCode == 0 && strings.TrimSpace(string(stdout)) == "200" {
+			// Server is ready
+			// Return the stream URL that clients can connect to
+			// Note: In production, this would use the Sprite's external IP or a tunnel
+			// For now, return localhost URL that can be used with SSH port forwarding
+			streamURL := fmt.Sprintf("http://localhost:%d", SpriteRunnerPort)
+			return streamURL, nil
+		}
+
+		// Wait before next poll
+		select {
+		case <-ctx.Done():
+			return "", ctx.Err()
+		case <-time.After(pollInterval):
+			// Continue polling
+		}
+	}
+
+	// Timeout - try to get logs for debugging
+	logs, _, _, _ := client.ExecuteOutput(ctx, spriteName, "", nil, "tail", "-20", SpriteRunnerLogPath)
+	return "", fmt.Errorf("wisp-sprite did not become ready within %v\nLogs:\n%s", timeout, string(logs))
+}
+
+// ConnectToSpriteStream creates a stream client connected to the Sprite's stream server.
+// The connection is made via HTTP to the Sprite's stream server.
+// token is an optional authentication token.
+func ConnectToSpriteStream(ctx context.Context, client sprite.Client, spriteName, token string) (*stream.StreamClient, error) {
+	// Wait for the sprite runner to be ready
+	streamURL, err := WaitForSpriteRunner(ctx, client, spriteName, 30*time.Second)
+	if err != nil {
+		return nil, fmt.Errorf("wisp-sprite not ready: %w", err)
+	}
+
+	// Create stream client with authentication if provided
+	var opts []stream.ClientOption
+	if token != "" {
+		opts = append(opts, stream.WithAuthToken(token))
+	}
+
+	// Set up HTTP client with custom transport for connection to Sprite
+	// In production, this would use a tunnel or direct connection
+	httpClient := &http.Client{
+		Timeout: 0, // No timeout for streaming connections
+	}
+	opts = append(opts, stream.WithHTTPClient(httpClient))
+
+	streamClient := stream.NewStreamClient(streamURL, opts...)
+
+	// Test connection
+	if err := streamClient.Connect(ctx); err != nil {
+		return nil, fmt.Errorf("failed to connect to stream server: %w", err)
+	}
+
+	return streamClient, nil
 }

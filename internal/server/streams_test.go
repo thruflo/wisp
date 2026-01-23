@@ -9,6 +9,7 @@ import (
 	"github.com/durable-streams/durable-streams/packages/caddy-plugin/store"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"github.com/thruflo/wisp/internal/stream"
 )
 
 func TestNewStreamManager(t *testing.T) {
@@ -601,4 +602,134 @@ func TestMessageType_Values(t *testing.T) {
 	assert.Equal(t, MessageType("claude_event"), MessageTypeClaudeEvent)
 	assert.Equal(t, MessageType("input_request"), MessageTypeInputRequest)
 	assert.Equal(t, MessageType("delete"), MessageTypeDelete)
+}
+
+// Tests for relay mode functionality
+
+func TestNewRelayStreamManager(t *testing.T) {
+	sm, err := NewRelayStreamManager("http://localhost:8374", "test-token")
+	require.NoError(t, err)
+	require.NotNil(t, sm)
+	defer sm.Close()
+
+	// Should be in relay mode
+	assert.True(t, sm.IsRelayMode())
+	assert.NotNil(t, sm.SpriteClient())
+}
+
+func TestStreamManager_IsRelayMode_LocalMode(t *testing.T) {
+	sm, err := NewStreamManager()
+	require.NoError(t, err)
+	defer sm.Close()
+
+	assert.False(t, sm.IsRelayMode())
+	assert.Nil(t, sm.SpriteClient())
+}
+
+func TestStreamManager_SendCommandToSprite_NotRelayMode(t *testing.T) {
+	sm, err := NewStreamManager()
+	require.NoError(t, err)
+	defer sm.Close()
+
+	// Should fail in local mode
+	_, err = sm.SendKillCommandToSprite(context.Background(), "cmd-1", false)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "not in relay mode")
+}
+
+func TestStreamManager_StartRelay_NotRelayMode(t *testing.T) {
+	sm, err := NewStreamManager()
+	require.NoError(t, err)
+	defer sm.Close()
+
+	// Should fail in local mode
+	err = sm.StartRelay(context.Background())
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "not in relay mode")
+}
+
+func TestConvertSessionEventToSession(t *testing.T) {
+	ts := time.Now().UTC()
+	se := &stream.SessionEvent{
+		ID:        "sess-1",
+		Repo:      "user/repo",
+		Branch:    "main",
+		Spec:      "spec.md",
+		Status:    stream.SessionStatusRunning,
+		Iteration: 3,
+		StartedAt: ts,
+	}
+
+	session := convertSessionEventToSession(se)
+
+	assert.Equal(t, "sess-1", session.ID)
+	assert.Equal(t, "user/repo", session.Repo)
+	assert.Equal(t, "main", session.Branch)
+	assert.Equal(t, "spec.md", session.Spec)
+	assert.Equal(t, SessionStatusRunning, session.Status)
+	assert.Equal(t, 3, session.Iteration)
+	assert.Equal(t, ts.Format(time.RFC3339), session.StartedAt)
+}
+
+func TestConvertTaskEventToTask(t *testing.T) {
+	te := &stream.TaskEvent{
+		ID:          "task-1",
+		SessionID:   "sess-1",
+		Order:       2,
+		Category:    "feature",
+		Description: "Implement feature X",
+		Status:      stream.TaskStatusInProgress,
+	}
+
+	task := convertTaskEventToTask(te)
+
+	assert.Equal(t, "task-1", task.ID)
+	assert.Equal(t, "sess-1", task.SessionID)
+	assert.Equal(t, 2, task.Order)
+	assert.Equal(t, "Implement feature X", task.Content)
+	assert.Equal(t, TaskStatusInProgress, task.Status)
+}
+
+func TestConvertInputRequestEventToInputRequest(t *testing.T) {
+	// In State Protocol, stream.InputRequestEvent doesn't have Responded/Response
+	// These are server-side state tracking fields set by HandleInputResponse
+	ire := &stream.InputRequestEvent{
+		ID:        "input-1",
+		SessionID: "sess-1",
+		Iteration: 4,
+		Question:  "Continue?",
+	}
+
+	ir := convertInputRequestEventToInputRequest(ire)
+
+	assert.Equal(t, "input-1", ir.ID)
+	assert.Equal(t, "sess-1", ir.SessionID)
+	assert.Equal(t, 4, ir.Iteration)
+	assert.Equal(t, "Continue?", ir.Question)
+	// Conversion always sets Responded=false, Response=nil (State Protocol pattern)
+	assert.False(t, ir.Responded)
+	assert.Nil(t, ir.Response)
+}
+
+func TestConvertClaudeEventToClaudeEvent(t *testing.T) {
+	ts := time.Now().UTC()
+	ce := &stream.ClaudeEvent{
+		ID:        "ce-1",
+		SessionID: "sess-1",
+		Iteration: 5,
+		Sequence:  10,
+		Message:   map[string]any{"type": "assistant"},
+		Timestamp: ts,
+	}
+
+	event := convertClaudeEventToClaudeEvent(ce)
+
+	assert.Equal(t, "ce-1", event.ID)
+	assert.Equal(t, "sess-1", event.SessionID)
+	assert.Equal(t, 5, event.Iteration)
+	assert.Equal(t, 10, event.Sequence)
+	assert.Equal(t, ts.Format(time.RFC3339), event.Timestamp)
+	msgMap, ok := event.Message.(map[string]any)
+	require.True(t, ok)
+	assert.Equal(t, "assistant", msgMap["type"])
 }

@@ -221,3 +221,12 @@ func TestStartFlagsAllRegistered(t *testing.T) {
 		assert.NotNil(t, flag, "flag --%s should be registered", name)
 	}
 }
+
+func TestSpriteRunnerConstants(t *testing.T) {
+	// Verify SpriteRunner constants have expected values
+	assert.Equal(t, 8374, SpriteRunnerPort)
+	assert.Equal(t, "/var/local/wisp/bin/wisp-sprite", SpriteRunnerBinaryPath)
+	assert.Equal(t, "/var/local/wisp/wisp-sprite.pid", SpriteRunnerPIDPath)
+	assert.Equal(t, "/var/local/wisp/wisp-sprite.log", SpriteRunnerLogPath)
+	assert.Equal(t, "bin/wisp-sprite", LocalSpriteRunnerPath)
+}

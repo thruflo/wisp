@@ -7,6 +7,7 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/thruflo/wisp/internal/config"
+	"github.com/thruflo/wisp/internal/logging"
 	"github.com/thruflo/wisp/internal/sprite"
 	"github.com/thruflo/wisp/internal/state"
 )
@@ -81,12 +82,14 @@ func runStop(cmd *cobra.Command, args []string) error {
 		exists, err := client.Exists(ctx, session.SpriteName)
 		if err != nil {
 			fmt.Printf("Warning: failed to check Sprite status: %v\n", err)
+			logging.Warn("failed to check sprite status", "error", err, "sprite", session.SpriteName, "branch", branch)
 		} else if exists {
 			// Sync state from Sprite to local
 			fmt.Printf("Syncing state from Sprite...\n")
 			syncMgr := state.NewSyncManager(client, store)
 			if err := syncMgr.SyncFromSprite(ctx, session.SpriteName, session.Branch); err != nil {
 				fmt.Printf("Warning: failed to sync state: %v\n", err)
+				logging.Warn("failed to sync state from sprite", "error", err, "sprite", session.SpriteName, "branch", branch)
 			} else {
 				fmt.Printf("State synced successfully.\n")
 			}
@@ -96,6 +99,7 @@ func runStop(cmd *cobra.Command, args []string) error {
 				fmt.Printf("Tearing down Sprite...\n")
 				if err := client.Delete(ctx, session.SpriteName); err != nil {
 					fmt.Printf("Warning: failed to teardown Sprite: %v\n", err)
+					logging.Warn("failed to teardown sprite", "error", err, "sprite", session.SpriteName, "branch", branch)
 				} else {
 					fmt.Printf("Sprite teardown complete.\n")
 				}
@@ -105,6 +109,7 @@ func runStop(cmd *cobra.Command, args []string) error {
 		}
 	} else {
 		fmt.Printf("Warning: SPRITE_TOKEN not found, skipping state sync.\n")
+		logging.Warn("sprite token not found, skipping state sync", "branch", branch)
 	}
 
 	// Update session status to stopped

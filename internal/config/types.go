@@ -15,8 +15,9 @@ type Limits struct {
 
 // ServerConfig defines optional web server configuration.
 type ServerConfig struct {
-	Port         int    `yaml:"port"`
-	PasswordHash string `yaml:"password_hash"`
+	Port         int      `yaml:"port"`
+	PasswordHash string   `yaml:"password_hash"`
+	CORSOrigins  []string `yaml:"cors_origins,omitempty"` // Allowed CORS origins. If empty, defaults to localhost only.
 }
 
 // Config represents the .wisp/config.yaml file.

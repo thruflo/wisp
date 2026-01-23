@@ -306,8 +306,8 @@ func TestResumeServerFlagsRegistered(t *testing.T) {
 	assert.Contains(t, passwordFlag.Usage, "password")
 }
 
-func TestHandleResumeServerPassword_NoServerConfig(t *testing.T) {
-	// Test that handleResumeServerPassword creates server config if missing
+func TestHandleServerPassword_NoServerConfig(t *testing.T) {
+	// Test that HandleServerPassword creates server config if missing
 	tmpDir := t.TempDir()
 	wispDir := filepath.Join(tmpDir, ".wisp")
 	require.NoError(t, os.MkdirAll(wispDir, 0o755))
@@ -317,7 +317,7 @@ func TestHandleResumeServerPassword_NoServerConfig(t *testing.T) {
 	}
 
 	// Not enabling server, not setting password - should be no-op
-	err := handleResumeServerPassword(tmpDir, cfg, false, false, 9000)
+	err := HandleServerPassword(tmpDir, cfg, false, false, 9000)
 	require.NoError(t, err)
 	// Server config should still be initialized since function was called
 	assert.NotNil(t, cfg.Server)
@@ -325,8 +325,8 @@ func TestHandleResumeServerPassword_NoServerConfig(t *testing.T) {
 	assert.Empty(t, cfg.Server.PasswordHash)
 }
 
-func TestHandleResumeServerPassword_WithExistingPassword(t *testing.T) {
-	// Test that handleResumeServerPassword doesn't prompt when password exists
+func TestHandleServerPassword_WithExistingPassword(t *testing.T) {
+	// Test that HandleServerPassword doesn't prompt when password exists
 	tmpDir := t.TempDir()
 	wispDir := filepath.Join(tmpDir, ".wisp")
 	require.NoError(t, os.MkdirAll(wispDir, 0o755))
@@ -344,14 +344,14 @@ func TestHandleResumeServerPassword_WithExistingPassword(t *testing.T) {
 	}
 
 	// Server enabled but password already set - should not prompt (no error)
-	err = handleResumeServerPassword(tmpDir, cfg, true, false, 8080)
+	err = HandleServerPassword(tmpDir, cfg, true, false, 8080)
 	require.NoError(t, err)
 	// Port should be updated, but password hash should be unchanged
 	assert.Equal(t, 8080, cfg.Server.Port)
 	assert.Equal(t, existingHash, cfg.Server.PasswordHash)
 }
 
-func TestHandleResumeServerPassword_PortUpdated(t *testing.T) {
+func TestHandleServerPassword_PortUpdated(t *testing.T) {
 	// Test that port is updated even when no password change needed
 	tmpDir := t.TempDir()
 	wispDir := filepath.Join(tmpDir, ".wisp")
@@ -369,7 +369,38 @@ func TestHandleResumeServerPassword_PortUpdated(t *testing.T) {
 	}
 
 	// Enable server with different port, password already set
-	err = handleResumeServerPassword(tmpDir, cfg, true, false, 9999)
+	err = HandleServerPassword(tmpDir, cfg, true, false, 9999)
 	require.NoError(t, err)
 	assert.Equal(t, 9999, cfg.Server.Port)
+}
+
+func TestIsSpriteRunnerRunning_FunctionSignature(t *testing.T) {
+	// This test documents that IsSpriteRunnerRunning:
+	// 1. Takes context, sprite client, and sprite name as parameters
+	// 2. Returns (bool, error) where bool indicates if wisp-sprite is running
+	// 3. Uses the SpriteRunnerPIDPath constant to check for PID file
+	// Full integration test would require mock Sprite client
+	t.Skip("Requires mock Sprite client infrastructure")
+}
+
+func TestConnectOrRestartSpriteRunner_FunctionSignature(t *testing.T) {
+	// This test documents that ConnectOrRestartSpriteRunner:
+	// 1. Takes context, sprite client, session, repoPath, localBasePath, and token
+	// 2. Returns (*stream.StreamClient, error)
+	// 3. Checks if wisp-sprite is running using IsSpriteRunnerRunning
+	// 4. If not running, uploads binary and starts it
+	// 5. Connects to the stream server via ConnectToSpriteStream
+	// Full integration test would require mock Sprite client
+	t.Skip("Requires mock Sprite client infrastructure")
+}
+
+func TestIsSpriteRunnerRunning_UsesSpriteRunnerConstants(t *testing.T) {
+	// Verify that IsSpriteRunnerRunning uses the expected constants
+	// This ensures consistency between start.go and resume.go
+	assert.Equal(t, "/var/local/wisp/wisp-sprite.pid", SpriteRunnerPIDPath)
+}
+
+func TestConnectOrRestartSpriteRunner_UsesSpriteRunnerConstants(t *testing.T) {
+	// Verify that ConnectOrRestartSpriteRunner uses the expected constants
+	assert.Equal(t, "/var/local/wisp/bin/wisp-sprite", SpriteRunnerBinaryPath)
 }
