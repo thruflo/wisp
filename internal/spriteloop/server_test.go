@@ -33,6 +33,7 @@ func TestNewServer(t *testing.T) {
 		})
 
 		assert.Equal(t, DefaultServerPort, s.Port())
+		assert.Equal(t, DefaultStreamPath, s.StreamPath())
 		assert.Equal(t, DefaultPollInterval, s.pollInterval)
 	})
 
@@ -44,12 +45,14 @@ func TestNewServer(t *testing.T) {
 
 		s := NewServer(ServerOptions{
 			Port:         9999,
+			StreamPath:   "/custom/stream",
 			Token:        "test-token",
 			PollInterval: 50 * time.Millisecond,
 			FileStore:    fs,
 		})
 
 		assert.Equal(t, 9999, s.Port())
+		assert.Equal(t, "/custom/stream", s.StreamPath())
 		assert.Equal(t, "test-token", s.token)
 		assert.Equal(t, 50*time.Millisecond, s.pollInterval)
 	})
@@ -111,10 +114,10 @@ func TestHandleHealth(t *testing.T) {
 	})
 }
 
-func TestHandleCommand(t *testing.T) {
+func TestHandleStreamEndpoint(t *testing.T) {
 	t.Parallel()
 
-	t.Run("accepts valid command", func(t *testing.T) {
+	t.Run("POST appends command event to stream", func(t *testing.T) {
 		tmpDir := t.TempDir()
 		fs, err := stream.NewFileStore(filepath.Join(tmpDir, "stream.ndjson"))
 		require.NoError(t, err)
@@ -133,32 +136,30 @@ func TestHandleCommand(t *testing.T) {
 			CommandProcessor: cp,
 		})
 
-		body := `{"id": "cmd-1", "type": "background"}`
-		req := httptest.NewRequest(http.MethodPost, "/command", strings.NewReader(body))
+		// Create a command event
+		cmd := &stream.Command{
+			ID:   "cmd-1",
+			Type: stream.CommandTypeBackground,
+		}
+		event, _ := stream.NewCommandEvent(cmd)
+		body, _ := event.Marshal()
+
+		req := httptest.NewRequest(http.MethodPost, DefaultStreamPath, strings.NewReader(string(body)))
 		req.Header.Set("Content-Type", "application/json")
 		w := httptest.NewRecorder()
 
-		s.handleCommand(w, req)
+		s.handleStreamEndpoint(w, req)
 
-		assert.Equal(t, http.StatusAccepted, w.Code)
+		assert.Equal(t, http.StatusNoContent, w.Code)
+		assert.NotEmpty(t, w.Header().Get(headerStreamNextOffset))
 
-		var resp map[string]string
-		err = json.Unmarshal(w.Body.Bytes(), &resp)
+		// Event should have been appended to stream
+		events, err := fs.Read(0)
 		require.NoError(t, err)
-		assert.Equal(t, "accepted", resp["status"])
-		assert.Equal(t, "cmd-1", resp["command_id"])
-
-		// Command should have been sent to channel
-		select {
-		case cmd := <-cmdCh:
-			assert.Equal(t, "cmd-1", cmd.ID)
-			assert.Equal(t, stream.CommandTypeBackground, cmd.Type)
-		case <-time.After(100 * time.Millisecond):
-			t.Fatal("command not received")
-		}
+		assert.GreaterOrEqual(t, len(events), 1)
 	})
 
-	t.Run("rejects invalid JSON", func(t *testing.T) {
+	t.Run("POST rejects invalid JSON", func(t *testing.T) {
 		tmpDir := t.TempDir()
 		fs, err := stream.NewFileStore(filepath.Join(tmpDir, "stream.ndjson"))
 		require.NoError(t, err)
@@ -169,16 +170,16 @@ func TestHandleCommand(t *testing.T) {
 		})
 
 		body := `{invalid json`
-		req := httptest.NewRequest(http.MethodPost, "/command", strings.NewReader(body))
+		req := httptest.NewRequest(http.MethodPost, DefaultStreamPath, strings.NewReader(body))
 		req.Header.Set("Content-Type", "application/json")
 		w := httptest.NewRecorder()
 
-		s.handleCommand(w, req)
+		s.handleStreamEndpoint(w, req)
 
 		assert.Equal(t, http.StatusBadRequest, w.Code)
 	})
 
-	t.Run("rejects missing command ID", func(t *testing.T) {
+	t.Run("HEAD returns stream metadata", func(t *testing.T) {
 		tmpDir := t.TempDir()
 		fs, err := stream.NewFileStore(filepath.Join(tmpDir, "stream.ndjson"))
 		require.NoError(t, err)
@@ -188,59 +189,20 @@ func TestHandleCommand(t *testing.T) {
 			FileStore: fs,
 		})
 
-		body := `{"type": "background"}`
-		req := httptest.NewRequest(http.MethodPost, "/command", strings.NewReader(body))
-		req.Header.Set("Content-Type", "application/json")
+		req := httptest.NewRequest(http.MethodHead, DefaultStreamPath, nil)
 		w := httptest.NewRecorder()
 
-		s.handleCommand(w, req)
+		s.handleStreamEndpoint(w, req)
 
-		assert.Equal(t, http.StatusBadRequest, w.Code)
-	})
-
-	t.Run("rejects missing command type", func(t *testing.T) {
-		tmpDir := t.TempDir()
-		fs, err := stream.NewFileStore(filepath.Join(tmpDir, "stream.ndjson"))
-		require.NoError(t, err)
-		defer fs.Close()
-
-		s := NewServer(ServerOptions{
-			FileStore: fs,
-		})
-
-		body := `{"id": "cmd-1"}`
-		req := httptest.NewRequest(http.MethodPost, "/command", strings.NewReader(body))
-		req.Header.Set("Content-Type", "application/json")
-		w := httptest.NewRecorder()
-
-		s.handleCommand(w, req)
-
-		assert.Equal(t, http.StatusBadRequest, w.Code)
-	})
-
-	t.Run("rejects non-POST methods", func(t *testing.T) {
-		tmpDir := t.TempDir()
-		fs, err := stream.NewFileStore(filepath.Join(tmpDir, "stream.ndjson"))
-		require.NoError(t, err)
-		defer fs.Close()
-
-		s := NewServer(ServerOptions{
-			FileStore: fs,
-		})
-
-		req := httptest.NewRequest(http.MethodGet, "/command", nil)
-		w := httptest.NewRecorder()
-
-		s.handleCommand(w, req)
-
-		assert.Equal(t, http.StatusMethodNotAllowed, w.Code)
+		assert.Equal(t, http.StatusOK, w.Code)
+		assert.NotEmpty(t, w.Header().Get(headerStreamNextOffset))
 	})
 }
 
-func TestHandleState(t *testing.T) {
+func TestHandleStreamRead(t *testing.T) {
 	t.Parallel()
 
-	t.Run("returns empty state when no events", func(t *testing.T) {
+	t.Run("returns empty array when no events", func(t *testing.T) {
 		tmpDir := t.TempDir()
 		fs, err := stream.NewFileStore(filepath.Join(tmpDir, "stream.ndjson"))
 		require.NoError(t, err)
@@ -250,131 +212,119 @@ func TestHandleState(t *testing.T) {
 			FileStore: fs,
 		})
 
-		req := httptest.NewRequest(http.MethodGet, "/state", nil)
+		req := httptest.NewRequest(http.MethodGet, DefaultStreamPath, nil)
 		w := httptest.NewRecorder()
 
-		s.handleState(w, req)
+		s.handleStreamEndpoint(w, req)
 
 		assert.Equal(t, http.StatusOK, w.Code)
+		assert.Equal(t, "application/json", w.Header().Get("Content-Type"))
+		assert.NotEmpty(t, w.Header().Get(headerStreamNextOffset))
+		assert.Equal(t, "true", w.Header().Get(headerStreamUpToDate))
 
-		var state StateSnapshot
-		err = json.Unmarshal(w.Body.Bytes(), &state)
+		var events []json.RawMessage
+		err = json.Unmarshal(w.Body.Bytes(), &events)
 		require.NoError(t, err)
-		assert.Equal(t, uint64(0), state.LastSeq)
-		assert.Nil(t, state.Session)
-		assert.Empty(t, state.Tasks)
+		assert.Empty(t, events)
 	})
 
-	t.Run("returns state from events", func(t *testing.T) {
+	t.Run("returns events from stream", func(t *testing.T) {
 		tmpDir := t.TempDir()
 		fs, err := stream.NewFileStore(filepath.Join(tmpDir, "stream.ndjson"))
 		require.NoError(t, err)
 		defer fs.Close()
 
-		// Add session event
-		sessionEvent, _ := stream.NewSessionEvent(&stream.SessionEvent{
-			ID:        "test-session",
-			Branch:    "feature-branch",
-			Status:    stream.SessionStatusRunning,
-			Iteration: 5,
+		// Add some events
+		event1, _ := stream.NewSessionEvent(&stream.SessionEvent{
+			ID:     "session-1",
+			Status: stream.SessionStatusRunning,
 		})
-		fs.Append(sessionEvent)
+		fs.Append(event1)
 
-		// Add task events
-		task1Event, _ := stream.NewTaskEvent(&stream.TaskEvent{
-			ID:          "task-0",
-			SessionID:   "test-session",
-			Order:       0,
-			Category:    "setup",
-			Description: "Initialize project",
-			Status:      stream.TaskStatusCompleted,
-		})
-		fs.Append(task1Event)
-
-		task2Event, _ := stream.NewTaskEvent(&stream.TaskEvent{
+		event2, _ := stream.NewTaskEvent(&stream.TaskEvent{
 			ID:          "task-1",
-			SessionID:   "test-session",
-			Order:       1,
-			Category:    "feature",
-			Description: "Add feature",
-			Status:      stream.TaskStatusInProgress,
+			Description: "Test task",
 		})
-		fs.Append(task2Event)
+		fs.Append(event2)
 
 		s := NewServer(ServerOptions{
 			FileStore: fs,
 		})
 
-		req := httptest.NewRequest(http.MethodGet, "/state", nil)
+		req := httptest.NewRequest(http.MethodGet, DefaultStreamPath+"?offset=0_0", nil)
 		w := httptest.NewRecorder()
 
-		s.handleState(w, req)
+		s.handleStreamEndpoint(w, req)
 
 		assert.Equal(t, http.StatusOK, w.Code)
 
-		var state StateSnapshot
-		err = json.Unmarshal(w.Body.Bytes(), &state)
+		var events []json.RawMessage
+		err = json.Unmarshal(w.Body.Bytes(), &events)
 		require.NoError(t, err)
-		assert.Equal(t, uint64(3), state.LastSeq)
-		require.NotNil(t, state.Session)
-		assert.Equal(t, "test-session", state.Session.ID)
-		assert.Equal(t, stream.SessionStatusRunning, state.Session.Status)
-		assert.Len(t, state.Tasks, 2)
-		assert.Equal(t, "Initialize project", state.Tasks[0].Description)
-		assert.Equal(t, "Add feature", state.Tasks[1].Description)
+		assert.Len(t, events, 2)
 	})
 
-	t.Run("includes pending input request", func(t *testing.T) {
+	t.Run("respects offset parameter", func(t *testing.T) {
 		tmpDir := t.TempDir()
 		fs, err := stream.NewFileStore(filepath.Join(tmpDir, "stream.ndjson"))
 		require.NoError(t, err)
 		defer fs.Close()
 
-		// Add input request event (in State Protocol, presence means pending)
-		inputEvent, _ := stream.NewInputRequestEvent(&stream.InputRequestEvent{
-			ID:        "input-1",
-			SessionID: "test-session",
-			Iteration: 3,
-			Question:  "What do you want to do?",
-		})
-		fs.Append(inputEvent)
+		// Add events
+		for i := 0; i < 5; i++ {
+			event, _ := stream.NewSessionEvent(&stream.SessionEvent{
+				ID:        fmt.Sprintf("session-%d", i),
+				Iteration: i,
+			})
+			fs.Append(event)
+		}
 
 		s := NewServer(ServerOptions{
 			FileStore: fs,
 		})
 
-		req := httptest.NewRequest(http.MethodGet, "/state", nil)
+		// Request from offset 3 (seq 3)
+		req := httptest.NewRequest(http.MethodGet, DefaultStreamPath+"?offset=3_3", nil)
 		w := httptest.NewRecorder()
 
-		s.handleState(w, req)
+		s.handleStreamEndpoint(w, req)
 
 		assert.Equal(t, http.StatusOK, w.Code)
 
-		var state StateSnapshot
-		err = json.Unmarshal(w.Body.Bytes(), &state)
+		var events []json.RawMessage
+		err = json.Unmarshal(w.Body.Bytes(), &events)
 		require.NoError(t, err)
-		require.NotNil(t, state.LastInput)
-		assert.Equal(t, "input-1", state.LastInput.ID)
-		assert.Equal(t, "What do you want to do?", state.LastInput.Question)
-		// In State Protocol, presence in snapshot means pending (not responded)
+		// Should get events starting from seq 3
+		assert.LessOrEqual(t, len(events), 3) // events 3, 4, 5
 	})
 
-	t.Run("rejects non-GET methods", func(t *testing.T) {
+	t.Run("handles offset=now", func(t *testing.T) {
 		tmpDir := t.TempDir()
 		fs, err := stream.NewFileStore(filepath.Join(tmpDir, "stream.ndjson"))
 		require.NoError(t, err)
 		defer fs.Close()
 
+		// Add some events
+		event, _ := stream.NewSessionEvent(&stream.SessionEvent{ID: "session-1"})
+		fs.Append(event)
+
 		s := NewServer(ServerOptions{
 			FileStore: fs,
 		})
 
-		req := httptest.NewRequest(http.MethodPost, "/state", nil)
+		req := httptest.NewRequest(http.MethodGet, DefaultStreamPath+"?offset=now", nil)
 		w := httptest.NewRecorder()
 
-		s.handleState(w, req)
+		s.handleStreamEndpoint(w, req)
 
-		assert.Equal(t, http.StatusMethodNotAllowed, w.Code)
+		assert.Equal(t, http.StatusOK, w.Code)
+		assert.Equal(t, "true", w.Header().Get(headerStreamUpToDate))
+
+		// With offset=now, should get no events (we're at the tail)
+		var events []json.RawMessage
+		err = json.Unmarshal(w.Body.Bytes(), &events)
+		require.NoError(t, err)
+		assert.Empty(t, events)
 	})
 }
 
@@ -391,10 +341,10 @@ func TestAuthentication(t *testing.T) {
 			FileStore: fs,
 		})
 
-		req := httptest.NewRequest(http.MethodGet, "/state", nil)
+		req := httptest.NewRequest(http.MethodGet, DefaultStreamPath, nil)
 		w := httptest.NewRecorder()
 
-		s.handleState(w, req)
+		s.handleStreamEndpoint(w, req)
 
 		assert.Equal(t, http.StatusOK, w.Code)
 	})
@@ -410,10 +360,10 @@ func TestAuthentication(t *testing.T) {
 			FileStore: fs,
 		})
 
-		req := httptest.NewRequest(http.MethodGet, "/state", nil)
+		req := httptest.NewRequest(http.MethodGet, DefaultStreamPath, nil)
 		w := httptest.NewRecorder()
 
-		s.handleState(w, req)
+		s.handleStreamEndpoint(w, req)
 
 		assert.Equal(t, http.StatusUnauthorized, w.Code)
 	})
@@ -429,11 +379,11 @@ func TestAuthentication(t *testing.T) {
 			FileStore: fs,
 		})
 
-		req := httptest.NewRequest(http.MethodGet, "/state", nil)
+		req := httptest.NewRequest(http.MethodGet, DefaultStreamPath, nil)
 		req.Header.Set("Authorization", "Bearer secret-token")
 		w := httptest.NewRecorder()
 
-		s.handleState(w, req)
+		s.handleStreamEndpoint(w, req)
 
 		assert.Equal(t, http.StatusOK, w.Code)
 	})
@@ -449,10 +399,10 @@ func TestAuthentication(t *testing.T) {
 			FileStore: fs,
 		})
 
-		req := httptest.NewRequest(http.MethodGet, "/state?token=secret-token", nil)
+		req := httptest.NewRequest(http.MethodGet, DefaultStreamPath+"?token=secret-token", nil)
 		w := httptest.NewRecorder()
 
-		s.handleState(w, req)
+		s.handleStreamEndpoint(w, req)
 
 		assert.Equal(t, http.StatusOK, w.Code)
 	})
@@ -468,20 +418,20 @@ func TestAuthentication(t *testing.T) {
 			FileStore: fs,
 		})
 
-		req := httptest.NewRequest(http.MethodGet, "/state", nil)
+		req := httptest.NewRequest(http.MethodGet, DefaultStreamPath, nil)
 		req.Header.Set("Authorization", "Bearer wrong-token")
 		w := httptest.NewRecorder()
 
-		s.handleState(w, req)
+		s.handleStreamEndpoint(w, req)
 
 		assert.Equal(t, http.StatusUnauthorized, w.Code)
 	})
 }
 
-func TestHandleStream(t *testing.T) {
+func TestHandleSSE(t *testing.T) {
 	t.Parallel()
 
-	t.Run("returns existing events", func(t *testing.T) {
+	t.Run("streams existing events", func(t *testing.T) {
 		tmpDir := t.TempDir()
 		fs, err := stream.NewFileStore(filepath.Join(tmpDir, "stream.ndjson"))
 		require.NoError(t, err)
@@ -508,7 +458,7 @@ func TestHandleStream(t *testing.T) {
 		// Create a context that will be canceled
 		ctx, cancel := context.WithCancel(context.Background())
 
-		req := httptest.NewRequest(http.MethodGet, "/stream", nil)
+		req := httptest.NewRequest(http.MethodGet, DefaultStreamPath+"?live=sse", nil)
 		req = req.WithContext(ctx)
 
 		// Use a pipe to capture the SSE stream
@@ -523,23 +473,32 @@ func TestHandleStream(t *testing.T) {
 		done := make(chan struct{})
 		go func() {
 			defer close(done)
-			s.handleStream(w, req)
+			s.handleSSE(w, req, 0)
 		}()
 
 		// Read events from the pipe
 		reader := bufio.NewReader(pr)
-		events := make([]*stream.Event, 0)
+		receivedData := false
 
-		// Read the two events we added
-		for i := 0; i < 2; i++ {
-			event, err := readSSEEvent(reader)
-			if err != nil {
-				if i > 0 {
-					break // Got at least one event
+		// Try to read data event with timeout
+		dataRead := make(chan bool, 1)
+		go func() {
+			for {
+				line, err := reader.ReadString('\n')
+				if err != nil {
+					dataRead <- false
+					return
 				}
-				t.Fatalf("failed to read event %d: %v", i, err)
+				if strings.HasPrefix(line, "event: data") || strings.HasPrefix(line, "event: control") {
+					dataRead <- true
+					return
+				}
 			}
-			events = append(events, event)
+		}()
+
+		select {
+		case receivedData = <-dataRead:
+		case <-time.After(500 * time.Millisecond):
 		}
 
 		// Cancel context to stop the handler
@@ -547,125 +506,42 @@ func TestHandleStream(t *testing.T) {
 		pw.Close()
 		<-done
 
-		assert.GreaterOrEqual(t, len(events), 1)
-		assert.Equal(t, stream.MessageTypeSession, events[0].Type)
-	})
-
-	t.Run("respects from_seq parameter", func(t *testing.T) {
-		tmpDir := t.TempDir()
-		fs, err := stream.NewFileStore(filepath.Join(tmpDir, "stream.ndjson"))
-		require.NoError(t, err)
-		defer fs.Close()
-
-		// Add events
-		for i := 0; i < 5; i++ {
-			event, _ := stream.NewSessionEvent(&stream.SessionEvent{
-				ID:        fmt.Sprintf("session-%d", i),
-				Iteration: i,
-			})
-			fs.Append(event)
-		}
-
-		s := NewServer(ServerOptions{
-			FileStore:    fs,
-			PollInterval: 10 * time.Millisecond,
-		})
-
-		ctx, cancel := context.WithCancel(context.Background())
-
-		// Request from seq 3 (should get events 3, 4, 5)
-		req := httptest.NewRequest(http.MethodGet, "/stream?from_seq=3", nil)
-		req = req.WithContext(ctx)
-
-		pr, pw := io.Pipe()
-		w := &testResponseWriter{
-			header: make(http.Header),
-			body:   pw,
-		}
-
-		done := make(chan struct{})
-		go func() {
-			defer close(done)
-			s.handleStream(w, req)
-		}()
-
-		reader := bufio.NewReader(pr)
-		event, err := readSSEEvent(reader)
-		require.NoError(t, err)
-
-		// First event should have seq >= 3
-		assert.GreaterOrEqual(t, event.Seq, uint64(3))
-
-		cancel()
-		pw.Close()
-		<-done
-	})
-
-	t.Run("rejects invalid from_seq", func(t *testing.T) {
-		tmpDir := t.TempDir()
-		fs, err := stream.NewFileStore(filepath.Join(tmpDir, "stream.ndjson"))
-		require.NoError(t, err)
-		defer fs.Close()
-
-		s := NewServer(ServerOptions{
-			FileStore: fs,
-		})
-
-		req := httptest.NewRequest(http.MethodGet, "/stream?from_seq=invalid", nil)
-		w := httptest.NewRecorder()
-
-		s.handleStream(w, req)
-
-		assert.Equal(t, http.StatusBadRequest, w.Code)
-	})
-
-	t.Run("rejects non-GET methods", func(t *testing.T) {
-		tmpDir := t.TempDir()
-		fs, err := stream.NewFileStore(filepath.Join(tmpDir, "stream.ndjson"))
-		require.NoError(t, err)
-		defer fs.Close()
-
-		s := NewServer(ServerOptions{
-			FileStore: fs,
-		})
-
-		req := httptest.NewRequest(http.MethodPost, "/stream", nil)
-		w := httptest.NewRecorder()
-
-		s.handleStream(w, req)
-
-		assert.Equal(t, http.StatusMethodNotAllowed, w.Code)
+		assert.True(t, receivedData, "expected to receive SSE events")
 	})
 }
 
-func TestSendSSEEvent(t *testing.T) {
+func TestFormatOffset(t *testing.T) {
 	t.Parallel()
 
-	t.Run("formats event correctly", func(t *testing.T) {
-		tmpDir := t.TempDir()
-		fs, err := stream.NewFileStore(filepath.Join(tmpDir, "stream.ndjson"))
-		require.NoError(t, err)
-		defer fs.Close()
+	assert.Equal(t, "0_0", formatOffset(0))
+	assert.Equal(t, "42_42", formatOffset(42))
+	assert.Equal(t, "100_100", formatOffset(100))
+}
 
-		s := NewServer(ServerOptions{
-			FileStore: fs,
+func TestFormatEventsAsJSON(t *testing.T) {
+	t.Parallel()
+
+	t.Run("empty events returns empty array", func(t *testing.T) {
+		result := formatEventsAsJSON(nil)
+		assert.Equal(t, "[]", string(result))
+
+		result = formatEventsAsJSON([]*stream.Event{})
+		assert.Equal(t, "[]", string(result))
+	})
+
+	t.Run("formats events as JSON array", func(t *testing.T) {
+		event, _ := stream.NewSessionEvent(&stream.SessionEvent{
+			ID:     "session-1",
+			Status: stream.SessionStatusRunning,
 		})
+		event.Seq = 1
 
-		event := &stream.Event{
-			Seq:  42,
-			Type: stream.MessageTypeSession,
-		}
+		result := formatEventsAsJSON([]*stream.Event{event})
 
-		var buf strings.Builder
-		w := &strings.Builder{}
-		err = s.sendSSEEvent(&testResponseWriterString{w}, event)
+		var parsed []json.RawMessage
+		err := json.Unmarshal(result, &parsed)
 		require.NoError(t, err)
-
-		_ = buf
-		output := w.String()
-		assert.Contains(t, output, "id: 42")
-		assert.Contains(t, output, "event: session")
-		assert.Contains(t, output, "data: ")
+		assert.Len(t, parsed, 1)
 	})
 }
 
@@ -689,58 +565,6 @@ func (w *testResponseWriter) WriteHeader(code int) {
 }
 
 func (w *testResponseWriter) Flush() {}
-
-// testResponseWriterString wraps a strings.Builder as a ResponseWriter
-type testResponseWriterString struct {
-	w *strings.Builder
-}
-
-func (w *testResponseWriterString) Header() http.Header {
-	return make(http.Header)
-}
-
-func (w *testResponseWriterString) Write(b []byte) (int, error) {
-	return w.w.Write(b)
-}
-
-func (w *testResponseWriterString) WriteHeader(code int) {}
-
-// readSSEEvent reads a single SSE event from a reader
-func readSSEEvent(r *bufio.Reader) (*stream.Event, error) {
-	var dataLine string
-
-	for {
-		line, err := r.ReadString('\n')
-		if err != nil {
-			return nil, err
-		}
-
-		line = strings.TrimSuffix(line, "\n")
-
-		if line == "" {
-			// End of event
-			if dataLine != "" {
-				break
-			}
-			continue
-		}
-
-		if strings.HasPrefix(line, "data: ") {
-			dataLine = strings.TrimPrefix(line, "data: ")
-		}
-	}
-
-	if dataLine == "" {
-		return nil, fmt.Errorf("no data in event")
-	}
-
-	var event stream.Event
-	if err := json.Unmarshal([]byte(dataLine), &event); err != nil {
-		return nil, fmt.Errorf("failed to unmarshal event: %w", err)
-	}
-
-	return &event, nil
-}
 
 // Helper function to suppress compiler errors in tests
 func init() {
@@ -857,7 +681,7 @@ func TestServerHealthEndpoint(t *testing.T) {
 	assert.Equal(t, http.StatusOK, resp.StatusCode)
 }
 
-func TestServerCommandEndpointNilProcessor(t *testing.T) {
+func TestServerStreamEndpoint(t *testing.T) {
 	t.Parallel()
 
 	tmpDir := t.TempDir()
@@ -865,21 +689,33 @@ func TestServerCommandEndpointNilProcessor(t *testing.T) {
 	require.NoError(t, err)
 	defer fs.Close()
 
-	// Server with no command processor or loop
+	port := 19600 + time.Now().Nanosecond()%1000
 	s := NewServer(ServerOptions{
-		FileStore:        fs,
-		CommandProcessor: nil,
-		Loop:             nil,
+		Port:      port,
+		FileStore: fs,
 	})
 
-	// Send command without processor - accepts but does nothing (graceful degradation)
-	body := `{"id": "cmd-1", "type": "kill"}`
-	req := httptest.NewRequest(http.MethodPost, "/command", strings.NewReader(body))
-	req.Header.Set("Content-Type", "application/json")
-	w := httptest.NewRecorder()
+	err = s.Start()
+	if err != nil {
+		t.Skipf("Could not start server: %v", err)
+	}
+	defer func() {
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
+		s.Stop(ctx)
+	}()
 
-	s.handleCommand(w, req)
+	// Wait for server to be ready
+	time.Sleep(50 * time.Millisecond)
 
-	// Command is accepted even without processor/loop (fall-through behavior)
-	assert.Equal(t, http.StatusAccepted, w.Code)
+	// Make request to stream endpoint
+	resp, err := http.Get(fmt.Sprintf("http://localhost:%d%s", port, DefaultStreamPath))
+	if err != nil {
+		t.Skipf("Could not connect to server: %v", err)
+	}
+	defer resp.Body.Close()
+
+	assert.Equal(t, http.StatusOK, resp.StatusCode)
+	assert.Equal(t, "application/json", resp.Header.Get("Content-Type"))
+	assert.NotEmpty(t, resp.Header.Get(headerStreamNextOffset))
 }

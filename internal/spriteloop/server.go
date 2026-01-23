@@ -4,8 +4,9 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
-	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -18,14 +19,28 @@ const (
 
 	// DefaultPollInterval is the default interval for polling the FileStore.
 	DefaultPollInterval = 100 * time.Millisecond
+
+	// DefaultStreamPath is the path for the durable-streams endpoint.
+	DefaultStreamPath = "/wisp/events"
+
+	// Durable-streams protocol headers.
+	headerStreamNextOffset = "Stream-Next-Offset"
+	headerStreamUpToDate   = "Stream-Up-To-Date"
 )
 
-// Server provides an HTTP server for streaming events and receiving commands.
+// Server provides an HTTP server implementing the durable-streams protocol.
 // It runs on the Sprite VM and serves as the communication endpoint for
 // TUI and web clients.
+//
+// Endpoints:
+//   - GET /wisp/events - Durable streams read (supports offset, live=sse, live=long-poll)
+//   - POST /wisp/events - Durable streams append (for commands and input responses)
+//   - HEAD /wisp/events - Stream metadata
+//   - GET /health - Health check
 type Server struct {
 	// Configuration
 	port         int
+	streamPath   string
 	token        string // Bearer token for authentication
 	pollInterval time.Duration
 
@@ -44,6 +59,7 @@ type Server struct {
 // ServerOptions holds configuration for creating a Server instance.
 type ServerOptions struct {
 	Port             int
+	StreamPath       string
 	Token            string
 	PollInterval     time.Duration
 	FileStore        *stream.FileStore
@@ -58,6 +74,11 @@ func NewServer(opts ServerOptions) *Server {
 		port = DefaultServerPort
 	}
 
+	streamPath := opts.StreamPath
+	if streamPath == "" {
+		streamPath = DefaultStreamPath
+	}
+
 	pollInterval := opts.PollInterval
 	if pollInterval == 0 {
 		pollInterval = DefaultPollInterval
@@ -65,6 +86,7 @@ func NewServer(opts ServerOptions) *Server {
 
 	return &Server{
 		port:             port,
+		streamPath:       streamPath,
 		token:            opts.Token,
 		pollInterval:     pollInterval,
 		fileStore:        opts.FileStore,
@@ -86,9 +108,9 @@ func (s *Server) Start() error {
 	s.mu.Unlock()
 
 	mux := http.NewServeMux()
-	mux.HandleFunc("/stream", s.handleStream)
-	mux.HandleFunc("/command", s.handleCommand)
-	mux.HandleFunc("/state", s.handleState)
+	// Durable-streams endpoint - handles GET (read/subscribe), POST (append), HEAD (metadata)
+	mux.HandleFunc(s.streamPath, s.handleStreamEndpoint)
+	// Health check endpoint
 	mux.HandleFunc("/health", s.handleHealth)
 
 	s.server = &http.Server{
@@ -147,6 +169,11 @@ func (s *Server) Port() int {
 	return s.port
 }
 
+// StreamPath returns the path for the stream endpoint.
+func (s *Server) StreamPath() string {
+	return s.streamPath
+}
+
 // Running returns whether the server is currently running.
 func (s *Server) Running() bool {
 	s.mu.Lock()
@@ -154,32 +181,114 @@ func (s *Server) Running() bool {
 	return s.running
 }
 
-// handleStream implements the SSE (Server-Sent Events) endpoint for streaming events.
-// GET /stream?from_seq=N
-func (s *Server) handleStream(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-
+// handleStreamEndpoint implements the durable-streams HTTP protocol.
+// - GET: Read events with optional live streaming (SSE or long-poll)
+// - POST: Append events to the stream (commands, input responses)
+// - HEAD: Return stream metadata
+func (s *Server) handleStreamEndpoint(w http.ResponseWriter, r *http.Request) {
 	// Check authentication
 	if !s.authenticate(r) {
 		http.Error(w, "Unauthorized", http.StatusUnauthorized)
 		return
 	}
 
-	// Parse from_seq parameter
+	switch r.Method {
+	case http.MethodGet:
+		s.handleStreamRead(w, r)
+	case http.MethodPost:
+		s.handleStreamAppend(w, r)
+	case http.MethodHead:
+		s.handleStreamHead(w, r)
+	default:
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+	}
+}
+
+// handleStreamRead handles GET requests for reading from the stream.
+// Supports durable-streams protocol:
+//   - ?offset=X - Start reading from offset (default: 0_0 for beginning)
+//   - ?offset=now - Start from current tail
+//   - ?live=sse - Server-Sent Events streaming
+//   - ?live=long-poll - Long polling for new messages
+func (s *Server) handleStreamRead(w http.ResponseWriter, r *http.Request) {
+	query := r.URL.Query()
+
+	// Parse offset
+	offsetStr := query.Get("offset")
 	fromSeq := uint64(0)
-	if fromSeqStr := r.URL.Query().Get("from_seq"); fromSeqStr != "" {
-		parsed, err := strconv.ParseUint(fromSeqStr, 10, 64)
-		if err != nil {
-			http.Error(w, "Invalid from_seq parameter", http.StatusBadRequest)
-			return
+	isNow := false
+
+	if offsetStr == "" || offsetStr == "0_0" {
+		fromSeq = 0
+	} else if offsetStr == "now" {
+		isNow = true
+		fromSeq = s.fileStore.LastSeq() + 1
+	} else {
+		// Parse offset format "readseq_byteoffset" - we use byte offset as sequence
+		parts := strings.Split(offsetStr, "_")
+		if len(parts) == 2 {
+			var seq uint64
+			fmt.Sscanf(parts[1], "%d", &seq)
+			fromSeq = seq
 		}
-		fromSeq = parsed
 	}
 
-	// Check if client supports SSE
+	liveMode := query.Get("live")
+
+	// Handle SSE mode
+	if liveMode == "sse" {
+		s.handleSSE(w, r, fromSeq)
+		return
+	}
+
+	// Read available messages
+	events, err := s.fileStore.Read(fromSeq)
+	if err != nil {
+		http.Error(w, "Internal error", http.StatusInternalServerError)
+		return
+	}
+
+	// Handle long-poll mode - wait if no messages and not at "now"
+	if liveMode == "long-poll" && len(events) == 0 && !isNow {
+		ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
+		defer cancel()
+
+		// Subscribe and wait for new events
+		eventCh, err := s.fileStore.Subscribe(ctx, fromSeq, s.pollInterval)
+		if err == nil {
+			select {
+			case event := <-eventCh:
+				if event != nil {
+					events = []*stream.Event{event}
+				}
+			case <-ctx.Done():
+				// Timeout - return empty response
+			}
+		}
+	}
+
+	// Calculate next offset
+	lastSeq := s.fileStore.LastSeq()
+	nextOffset := formatOffset(lastSeq)
+	if len(events) > 0 {
+		nextOffset = formatOffset(events[len(events)-1].Seq)
+	}
+
+	// Set response headers
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set(headerStreamNextOffset, nextOffset)
+	if len(events) == 0 || (len(events) > 0 && events[len(events)-1].Seq >= lastSeq) {
+		w.Header().Set(headerStreamUpToDate, "true")
+	}
+
+	// Format response as JSON array
+	body := formatEventsAsJSON(events)
+	w.WriteHeader(http.StatusOK)
+	w.Write(body)
+}
+
+// handleSSE handles Server-Sent Events streaming per durable-streams protocol.
+func (s *Server) handleSSE(w http.ResponseWriter, r *http.Request, fromSeq uint64) {
 	flusher, ok := w.(http.Flusher)
 	if !ok {
 		http.Error(w, "Streaming not supported", http.StatusInternalServerError)
@@ -192,28 +301,19 @@ func (s *Server) handleStream(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Connection", "keep-alive")
 	w.Header().Set("X-Accel-Buffering", "no") // Disable nginx buffering
 
-	// Send initial events
-	events, err := s.fileStore.Read(fromSeq)
-	if err == nil {
-		for _, event := range events {
-			if err := s.sendSSEEvent(w, event); err != nil {
-				return
-			}
-			flusher.Flush()
-			if event.Seq >= fromSeq {
-				fromSeq = event.Seq + 1
-			}
-		}
-	}
+	w.WriteHeader(http.StatusOK)
+	flusher.Flush()
 
-	// Subscribe for new events
 	ctx := r.Context()
+	currentSeq := fromSeq
+	sentInitialControl := false
+
+	// Reconnect timeout (60 seconds)
+	reconnectTimer := time.NewTimer(60 * time.Second)
+	defer reconnectTimer.Stop()
+
 	ticker := time.NewTicker(s.pollInterval)
 	defer ticker.Stop()
-
-	// Send keepalive comments periodically
-	keepaliveTicker := time.NewTicker(15 * time.Second)
-	defer keepaliveTicker.Stop()
 
 	for {
 		select {
@@ -221,183 +321,152 @@ func (s *Server) handleStream(w http.ResponseWriter, r *http.Request) {
 			return
 		case <-s.shutdown:
 			return
-		case <-keepaliveTicker.C:
-			// Send keepalive comment
-			if _, err := fmt.Fprintf(w, ": keepalive\n\n"); err != nil {
-				return
-			}
-			flusher.Flush()
+		case <-reconnectTimer.C:
+			return
 		case <-ticker.C:
-			events, err := s.fileStore.Read(fromSeq)
+			events, err := s.fileStore.Read(currentSeq)
 			if err != nil {
 				continue
 			}
-			for _, event := range events {
-				if err := s.sendSSEEvent(w, event); err != nil {
-					return
+
+			if len(events) > 0 {
+				// Send data event with JSON array
+				body := formatEventsAsJSON(events)
+				fmt.Fprintf(w, "event: data\n")
+				for _, line := range strings.Split(string(body), "\n") {
+					fmt.Fprintf(w, "data:%s\n", line)
 				}
+				fmt.Fprintf(w, "\n")
+
+				// Update current sequence
+				currentSeq = events[len(events)-1].Seq + 1
+
+				// Send control event
+				lastSeq := s.fileStore.LastSeq()
+				control := map[string]interface{}{
+					"streamNextOffset": formatOffset(events[len(events)-1].Seq),
+				}
+				if currentSeq > lastSeq {
+					control["upToDate"] = true
+				}
+				controlJSON, _ := json.Marshal(control)
+				fmt.Fprintf(w, "event: control\n")
+				fmt.Fprintf(w, "data:%s\n\n", controlJSON)
+
 				flusher.Flush()
-				if event.Seq >= fromSeq {
-					fromSeq = event.Seq + 1
+				sentInitialControl = true
+			} else if !sentInitialControl {
+				// Send initial control event showing current position
+				lastSeq := s.fileStore.LastSeq()
+				control := map[string]interface{}{
+					"streamNextOffset": formatOffset(lastSeq),
+					"upToDate":         true,
 				}
+				controlJSON, _ := json.Marshal(control)
+				fmt.Fprintf(w, "event: control\n")
+				fmt.Fprintf(w, "data:%s\n\n", controlJSON)
+
+				flusher.Flush()
+				sentInitialControl = true
 			}
 		}
 	}
 }
 
-// sendSSEEvent sends a single event in SSE format.
-func (s *Server) sendSSEEvent(w http.ResponseWriter, event *stream.Event) error {
-	data, err := json.Marshal(event)
+// handleStreamAppend handles POST requests to append events to the stream.
+// Per durable-streams protocol, events are appended and acknowledged.
+func (s *Server) handleStreamAppend(w http.ResponseWriter, r *http.Request) {
+	body, err := io.ReadAll(r.Body)
 	if err != nil {
-		return err
-	}
-
-	_, err = fmt.Fprintf(w, "id: %d\nevent: %s\ndata: %s\n\n", event.Seq, event.Type, data)
-	return err
-}
-
-// handleCommand receives commands from clients.
-// POST /command
-func (s *Server) handleCommand(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		http.Error(w, "Failed to read request body", http.StatusBadRequest)
 		return
 	}
 
-	// Check authentication
-	if !s.authenticate(r) {
-		http.Error(w, "Unauthorized", http.StatusUnauthorized)
+	// Try to unmarshal as a stream event
+	event, err := stream.UnmarshalEvent(body)
+	if err != nil {
+		http.Error(w, fmt.Sprintf("Invalid event JSON: %v", err), http.StatusBadRequest)
 		return
 	}
 
-	// Parse command from request body
-	var cmd stream.Command
-	if err := json.NewDecoder(r.Body).Decode(&cmd); err != nil {
-		http.Error(w, fmt.Sprintf("Invalid command JSON: %v", err), http.StatusBadRequest)
-		return
-	}
-
-	// Validate command
-	if cmd.ID == "" {
-		http.Error(w, "Command ID is required", http.StatusBadRequest)
-		return
-	}
-	if cmd.Type == "" {
-		http.Error(w, "Command type is required", http.StatusBadRequest)
-		return
-	}
-
-	// Process command via CommandProcessor if available
-	if s.commandProcessor != nil {
-		if err := s.commandProcessor.ProcessCommand(&cmd); err != nil {
-			// Error ack was already published by CommandProcessor
-			w.Header().Set("Content-Type", "application/json")
-			w.WriteHeader(http.StatusAccepted)
-			json.NewEncoder(w).Encode(map[string]string{
-				"status":     "accepted",
-				"command_id": cmd.ID,
-				"note":       "Command processing failed, check ack in stream",
-			})
+	// Process based on event type
+	switch event.Type {
+	case stream.MessageTypeCommand:
+		cmd, err := event.CommandData()
+		if err != nil {
+			http.Error(w, fmt.Sprintf("Invalid command data: %v", err), http.StatusBadRequest)
 			return
 		}
-	} else {
-		// Fall back to sending directly to loop's command channel
-		if s.loop != nil {
-			select {
-			case s.loop.CommandCh() <- &cmd:
-			default:
-				http.Error(w, "Command channel full", http.StatusServiceUnavailable)
-				return
-			}
+
+		// Append command to stream (CommandProcessor watches the stream)
+		if err := s.fileStore.Append(event); err != nil {
+			http.Error(w, fmt.Sprintf("Failed to append event: %v", err), http.StatusInternalServerError)
+			return
 		}
-	}
 
-	// Return accepted status
+		// Return success with next offset
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set(headerStreamNextOffset, formatOffset(event.Seq))
+		w.WriteHeader(http.StatusNoContent)
+
+		// Note: CommandProcessor will process the command and publish an ack
+		_ = cmd // cmd is processed asynchronously via stream subscription
+
+	case stream.MessageTypeInputResponse:
+		// Append input response to stream
+		if err := s.fileStore.Append(event); err != nil {
+			http.Error(w, fmt.Sprintf("Failed to append event: %v", err), http.StatusInternalServerError)
+			return
+		}
+
+		// Return success with next offset
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set(headerStreamNextOffset, formatOffset(event.Seq))
+		w.WriteHeader(http.StatusNoContent)
+
+	default:
+		// For other event types, just append to stream
+		if err := s.fileStore.Append(event); err != nil {
+			http.Error(w, fmt.Sprintf("Failed to append event: %v", err), http.StatusInternalServerError)
+			return
+		}
+
+		w.Header().Set(headerStreamNextOffset, formatOffset(event.Seq))
+		w.WriteHeader(http.StatusNoContent)
+	}
+}
+
+// handleStreamHead handles HEAD requests for stream metadata.
+func (s *Server) handleStreamHead(w http.ResponseWriter, r *http.Request) {
+	lastSeq := s.fileStore.LastSeq()
 	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusAccepted)
-	json.NewEncoder(w).Encode(map[string]string{
-		"status":     "accepted",
-		"command_id": cmd.ID,
-	})
+	w.Header().Set(headerStreamNextOffset, formatOffset(lastSeq))
+	w.WriteHeader(http.StatusOK)
 }
 
-// handleState returns the current state snapshot.
-// GET /state
-func (s *Server) handleState(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-
-	// Check authentication
-	if !s.authenticate(r) {
-		http.Error(w, "Unauthorized", http.StatusUnauthorized)
-		return
-	}
-
-	// Build state snapshot from recent events
-	state := s.buildStateSnapshot()
-
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(state)
+// formatOffset formats a sequence number as a durable-streams offset string.
+// Format: "readseq_byteoffset" - we use seq for both since we don't track byte offsets.
+func formatOffset(seq uint64) string {
+	return fmt.Sprintf("%d_%d", seq, seq)
 }
 
-// StateSnapshot represents the current state of the session.
-type StateSnapshot struct {
-	LastSeq   uint64                 `json:"last_seq"`
-	Session   *stream.SessionEvent   `json:"session,omitempty"`
-	Tasks     []*stream.TaskEvent    `json:"tasks,omitempty"`
-	LastInput *stream.InputRequestEvent `json:"last_input,omitempty"`
-}
-
-// buildStateSnapshot constructs a state snapshot from the FileStore.
-func (s *Server) buildStateSnapshot() *StateSnapshot {
-	snapshot := &StateSnapshot{
-		LastSeq: s.fileStore.LastSeq(),
-		Tasks:   []*stream.TaskEvent{},
+// formatEventsAsJSON formats events as a JSON array.
+func formatEventsAsJSON(events []*stream.Event) []byte {
+	if len(events) == 0 {
+		return []byte("[]")
 	}
 
-	// Read all events
-	events, err := s.fileStore.Read(0)
-	if err != nil {
-		return snapshot
-	}
-
-	// Track tasks by order (later updates override earlier)
-	taskByOrder := make(map[int]*stream.TaskEvent)
-
+	var result []json.RawMessage
 	for _, event := range events {
-		switch event.Type {
-		case stream.MessageTypeSession:
-			session, err := event.SessionData()
-			if err == nil {
-				snapshot.Session = session
-			}
-		case stream.MessageTypeTask:
-			task, err := event.TaskData()
-			if err == nil {
-				taskByOrder[task.Order] = task
-			}
-		case stream.MessageTypeInputRequest:
-			input, err := event.InputRequestData()
-			if err == nil {
-				// In State Protocol, presence means it's pending
-				snapshot.LastInput = input
-			}
-		case stream.MessageTypeInputResponse:
-			// Response received - clear pending input
-			snapshot.LastInput = nil
+		data, err := event.Marshal()
+		if err != nil {
+			continue
 		}
+		result = append(result, data)
 	}
 
-	// Convert task map to slice, sorted by order
-	for i := 0; i < len(taskByOrder); i++ {
-		if task, ok := taskByOrder[i]; ok {
-			snapshot.Tasks = append(snapshot.Tasks, task)
-		}
-	}
-
-	return snapshot
+	body, _ := json.Marshal(result)
+	return body
 }
 
 // handleHealth returns a simple health check response.
