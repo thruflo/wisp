@@ -41,9 +41,12 @@ type Server struct {
 	streams *StreamManager
 
 	// Input handling
-	inputMu          sync.Mutex
-	pendingInputs    map[string]string // request_id -> response
-	respondedInputs  map[string]bool   // request_id -> true if already responded
+	inputMu         sync.Mutex
+	pendingInputs   map[string]string // request_id -> response
+	respondedInputs map[string]bool   // request_id -> true if already responded
+
+	// CORS configuration
+	corsOrigins map[string]bool // Allowed origins for CORS. nil means default (localhost only).
 
 	// Static assets filesystem
 	assets fs.FS
@@ -57,6 +60,9 @@ type Config struct {
 	Port         int
 	PasswordHash string
 	Assets       fs.FS // Optional: static assets filesystem. If nil, uses embedded assets.
+
+	// CORS configuration
+	CORSOrigins []string // Allowed CORS origins. If empty, defaults to localhost only.
 
 	// Relay mode configuration
 	SpriteURL       string // URL of the Sprite stream server (e.g., "http://localhost:8374")
@@ -92,11 +98,15 @@ func NewServer(cfg *Config) (*Server, error) {
 		assets = web.GetAssets("")
 	}
 
+	// Build CORS origins map
+	corsOrigins := buildCORSOriginsMap(cfg.CORSOrigins)
+
 	return &Server{
 		port:         cfg.Port,
 		passwordHash: cfg.PasswordHash,
 		tokens:       make(map[string]time.Time),
 		streams:      streams,
+		corsOrigins:  corsOrigins,
 		assets:       assets,
 	}, nil
 }
@@ -109,6 +119,7 @@ func NewServerFromConfig(cfg *config.ServerConfig) (*Server, error) {
 	return NewServer(&Config{
 		Port:         cfg.Port,
 		PasswordHash: cfg.PasswordHash,
+		CORSOrigins:  cfg.CORSOrigins,
 	})
 }
 
@@ -214,13 +225,38 @@ func (s *Server) ListenAddr() string {
 
 // setupRoutes configures the HTTP routes.
 func (s *Server) setupRoutes(mux *http.ServeMux) {
-	// Public endpoint
-	mux.HandleFunc("/auth", s.handleAuth)
+	// Public endpoint with CORS preflight support
+	mux.HandleFunc("/auth", s.withCORS(s.handleAuth))
 
-	// Protected endpoints
-	mux.HandleFunc("/stream", s.withAuth(s.handleStream))
-	mux.HandleFunc("/input", s.withAuth(s.handleInput))
+	// Protected endpoints with CORS preflight support
+	mux.HandleFunc("/stream", s.withCORS(s.withAuth(s.handleStream)))
+	mux.HandleFunc("/input", s.withCORS(s.withAuth(s.handleInput)))
 	mux.HandleFunc("/", s.handleStatic) // Static assets are public for initial page load
+}
+
+// withCORS wraps a handler with CORS support including preflight handling.
+func (s *Server) withCORS(handler http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		// Handle preflight OPTIONS requests
+		if r.Method == http.MethodOptions {
+			s.handlePreflight(w, r)
+			return
+		}
+
+		// Set CORS headers for actual requests
+		origin := r.Header.Get("Origin")
+		if origin != "" {
+			if !s.isOriginAllowed(origin) {
+				http.Error(w, "origin not allowed", http.StatusForbidden)
+				return
+			}
+			w.Header().Set("Access-Control-Allow-Origin", origin)
+			w.Header().Set("Access-Control-Allow-Credentials", "true")
+			w.Header().Set("Vary", "Origin")
+		}
+
+		handler(w, r)
+	}
 }
 
 // withAuth wraps a handler with authentication middleware.
@@ -322,6 +358,71 @@ func (s *Server) cleanupExpiredTokens(ctx context.Context) {
 	}
 }
 
+// Default CORS origins (localhost for development)
+var defaultCORSOrigins = []string{
+	"http://localhost:3000",
+	"http://localhost:5173",
+	"http://127.0.0.1:3000",
+	"http://127.0.0.1:5173",
+}
+
+// buildCORSOriginsMap creates a map of allowed origins for fast lookup.
+// If the input list is empty, returns default localhost origins.
+func buildCORSOriginsMap(origins []string) map[string]bool {
+	if len(origins) == 0 {
+		origins = defaultCORSOrigins
+	}
+	m := make(map[string]bool, len(origins))
+	for _, o := range origins {
+		m[o] = true
+	}
+	return m
+}
+
+// isOriginAllowed checks if the request origin is in the allowed list.
+func (s *Server) isOriginAllowed(origin string) bool {
+	if origin == "" {
+		return false
+	}
+	return s.corsOrigins[origin]
+}
+
+// setCORSHeaders sets CORS headers if the origin is allowed.
+// Returns true if the origin was allowed.
+func (s *Server) setCORSHeaders(w http.ResponseWriter, r *http.Request) bool {
+	origin := r.Header.Get("Origin")
+	if origin == "" {
+		// Not a CORS request
+		return true
+	}
+
+	if !s.isOriginAllowed(origin) {
+		return false
+	}
+
+	w.Header().Set("Access-Control-Allow-Origin", origin)
+	w.Header().Set("Access-Control-Allow-Credentials", "true")
+	w.Header().Set("Vary", "Origin")
+	return true
+}
+
+// handlePreflight handles CORS preflight OPTIONS requests.
+func (s *Server) handlePreflight(w http.ResponseWriter, r *http.Request) {
+	origin := r.Header.Get("Origin")
+	if origin == "" || !s.isOriginAllowed(origin) {
+		http.Error(w, "origin not allowed", http.StatusForbidden)
+		return
+	}
+
+	w.Header().Set("Access-Control-Allow-Origin", origin)
+	w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+	w.Header().Set("Access-Control-Allow-Headers", "Authorization, Content-Type")
+	w.Header().Set("Access-Control-Allow-Credentials", "true")
+	w.Header().Set("Access-Control-Max-Age", "86400") // 24 hours
+	w.Header().Set("Vary", "Origin")
+	w.WriteHeader(http.StatusNoContent)
+}
+
 // Protocol header names for Durable Streams
 const (
 	headerStreamNextOffset = "Stream-Next-Offset"
@@ -337,8 +438,7 @@ func (s *Server) handleStream(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Set CORS headers
-	w.Header().Set("Access-Control-Allow-Origin", "*")
+	// Expose stream-specific headers
 	w.Header().Set("Access-Control-Expose-Headers", "Stream-Next-Offset, Stream-Up-To-Date, Stream-Cursor")
 
 	// Get stream path

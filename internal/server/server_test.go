@@ -1247,3 +1247,255 @@ func TestIsImmutableAsset(t *testing.T) {
 		})
 	}
 }
+
+// createTestServerWithCORS creates a server with custom CORS origins for testing.
+func createTestServerWithCORS(t *testing.T, corsOrigins []string) *Server {
+	t.Helper()
+
+	hash, err := auth.HashPassword(testPassword)
+	if err != nil {
+		t.Fatalf("failed to hash password: %v", err)
+	}
+
+	server, err := NewServer(&Config{
+		Port:         0,
+		PasswordHash: hash,
+		CORSOrigins:  corsOrigins,
+	})
+	if err != nil {
+		t.Fatalf("failed to create server: %v", err)
+	}
+
+	return server
+}
+
+func TestCORSDefaultOrigins(t *testing.T) {
+	server := createTestServer(t) // Uses default CORS origins
+
+	// Default origins should include localhost development ports
+	if !server.isOriginAllowed("http://localhost:3000") {
+		t.Error("expected http://localhost:3000 to be allowed by default")
+	}
+	if !server.isOriginAllowed("http://localhost:5173") {
+		t.Error("expected http://localhost:5173 to be allowed by default")
+	}
+	if !server.isOriginAllowed("http://127.0.0.1:3000") {
+		t.Error("expected http://127.0.0.1:3000 to be allowed by default")
+	}
+
+	// Random origins should be rejected
+	if server.isOriginAllowed("http://evil.com") {
+		t.Error("expected http://evil.com to be rejected")
+	}
+	if server.isOriginAllowed("http://localhost:8080") {
+		t.Error("expected http://localhost:8080 to be rejected (not in default list)")
+	}
+}
+
+func TestCORSCustomOrigins(t *testing.T) {
+	server := createTestServerWithCORS(t, []string{"https://myapp.com", "https://staging.myapp.com"})
+
+	// Custom origins should be allowed
+	if !server.isOriginAllowed("https://myapp.com") {
+		t.Error("expected https://myapp.com to be allowed")
+	}
+	if !server.isOriginAllowed("https://staging.myapp.com") {
+		t.Error("expected https://staging.myapp.com to be allowed")
+	}
+
+	// Default localhost should NOT be allowed when custom origins are specified
+	if server.isOriginAllowed("http://localhost:3000") {
+		t.Error("expected http://localhost:3000 to be rejected when custom origins are set")
+	}
+
+	// Other origins should be rejected
+	if server.isOriginAllowed("https://evil.com") {
+		t.Error("expected https://evil.com to be rejected")
+	}
+}
+
+func TestCORSPreflightRequest(t *testing.T) {
+	server := createTestServer(t)
+
+	mux := http.NewServeMux()
+	server.setupRoutes(mux)
+
+	t.Run("preflight allowed origin", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodOptions, "/stream", nil)
+		req.Header.Set("Origin", "http://localhost:3000")
+		req.Header.Set("Access-Control-Request-Method", "GET")
+		req.Header.Set("Access-Control-Request-Headers", "Authorization")
+		w := httptest.NewRecorder()
+
+		mux.ServeHTTP(w, req)
+
+		if w.Code != http.StatusNoContent {
+			t.Errorf("expected status %d, got %d", http.StatusNoContent, w.Code)
+		}
+
+		if w.Header().Get("Access-Control-Allow-Origin") != "http://localhost:3000" {
+			t.Errorf("expected Access-Control-Allow-Origin to be http://localhost:3000, got %s",
+				w.Header().Get("Access-Control-Allow-Origin"))
+		}
+
+		if w.Header().Get("Access-Control-Allow-Methods") == "" {
+			t.Error("expected Access-Control-Allow-Methods header")
+		}
+
+		if w.Header().Get("Access-Control-Allow-Headers") == "" {
+			t.Error("expected Access-Control-Allow-Headers header")
+		}
+	})
+
+	t.Run("preflight rejected origin", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodOptions, "/stream", nil)
+		req.Header.Set("Origin", "http://evil.com")
+		req.Header.Set("Access-Control-Request-Method", "GET")
+		w := httptest.NewRecorder()
+
+		mux.ServeHTTP(w, req)
+
+		if w.Code != http.StatusForbidden {
+			t.Errorf("expected status %d, got %d", http.StatusForbidden, w.Code)
+		}
+	})
+}
+
+func TestCORSActualRequest(t *testing.T) {
+	server := createTestServer(t)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	go func() {
+		server.Start(ctx)
+	}()
+
+	time.Sleep(50 * time.Millisecond)
+	defer server.Stop()
+
+	addr := server.ListenAddr()
+	token := getAuthToken(t, addr)
+
+	t.Run("request with allowed origin", func(t *testing.T) {
+		req, _ := http.NewRequest("GET", "http://"+addr+"/stream", nil)
+		req.Header.Set("Authorization", "Bearer "+token)
+		req.Header.Set("Origin", "http://localhost:3000")
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatalf("failed to make request: %v", err)
+		}
+		defer resp.Body.Close()
+
+		if resp.StatusCode != http.StatusOK {
+			t.Errorf("expected status %d, got %d", http.StatusOK, resp.StatusCode)
+		}
+
+		allowOrigin := resp.Header.Get("Access-Control-Allow-Origin")
+		if allowOrigin != "http://localhost:3000" {
+			t.Errorf("expected Access-Control-Allow-Origin to be http://localhost:3000, got %s", allowOrigin)
+		}
+
+		if resp.Header.Get("Vary") != "Origin" {
+			t.Errorf("expected Vary: Origin header, got %s", resp.Header.Get("Vary"))
+		}
+	})
+
+	t.Run("request with rejected origin", func(t *testing.T) {
+		req, _ := http.NewRequest("GET", "http://"+addr+"/stream", nil)
+		req.Header.Set("Authorization", "Bearer "+token)
+		req.Header.Set("Origin", "http://evil.com")
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatalf("failed to make request: %v", err)
+		}
+		defer resp.Body.Close()
+
+		if resp.StatusCode != http.StatusForbidden {
+			t.Errorf("expected status %d, got %d", http.StatusForbidden, resp.StatusCode)
+		}
+	})
+
+	t.Run("request without origin header (same-origin)", func(t *testing.T) {
+		req, _ := http.NewRequest("GET", "http://"+addr+"/stream", nil)
+		req.Header.Set("Authorization", "Bearer "+token)
+		// No Origin header - same-origin request
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatalf("failed to make request: %v", err)
+		}
+		defer resp.Body.Close()
+
+		// Same-origin requests should work
+		if resp.StatusCode != http.StatusOK {
+			t.Errorf("expected status %d, got %d", http.StatusOK, resp.StatusCode)
+		}
+
+		// No CORS headers for same-origin
+		if resp.Header.Get("Access-Control-Allow-Origin") != "" {
+			t.Error("expected no Access-Control-Allow-Origin header for same-origin request")
+		}
+	})
+}
+
+func TestCORSAuthEndpoint(t *testing.T) {
+	server := createTestServer(t)
+
+	mux := http.NewServeMux()
+	server.setupRoutes(mux)
+
+	t.Run("auth with allowed origin", func(t *testing.T) {
+		body := fmt.Sprintf(`{"password":"%s"}`, testPassword)
+		req := httptest.NewRequest(http.MethodPost, "/auth", strings.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Origin", "http://localhost:3000")
+		w := httptest.NewRecorder()
+
+		mux.ServeHTTP(w, req)
+
+		if w.Code != http.StatusOK {
+			t.Errorf("expected status %d, got %d", http.StatusOK, w.Code)
+		}
+
+		if w.Header().Get("Access-Control-Allow-Origin") != "http://localhost:3000" {
+			t.Errorf("expected Access-Control-Allow-Origin header, got %s",
+				w.Header().Get("Access-Control-Allow-Origin"))
+		}
+	})
+
+	t.Run("auth with rejected origin", func(t *testing.T) {
+		body := fmt.Sprintf(`{"password":"%s"}`, testPassword)
+		req := httptest.NewRequest(http.MethodPost, "/auth", strings.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Origin", "http://evil.com")
+		w := httptest.NewRecorder()
+
+		mux.ServeHTTP(w, req)
+
+		if w.Code != http.StatusForbidden {
+			t.Errorf("expected status %d, got %d", http.StatusForbidden, w.Code)
+		}
+	})
+}
+
+func TestBuildCORSOriginsMap(t *testing.T) {
+	t.Run("empty input uses defaults", func(t *testing.T) {
+		m := buildCORSOriginsMap(nil)
+		if !m["http://localhost:3000"] {
+			t.Error("expected default origins to include http://localhost:3000")
+		}
+		if !m["http://localhost:5173"] {
+			t.Error("expected default origins to include http://localhost:5173")
+		}
+	})
+
+	t.Run("custom origins override defaults", func(t *testing.T) {
+		m := buildCORSOriginsMap([]string{"https://custom.com"})
+		if !m["https://custom.com"] {
+			t.Error("expected custom origin to be in map")
+		}
+		if m["http://localhost:3000"] {
+			t.Error("expected default origins to not be in map when custom origins provided")
+		}
+	})
+}
