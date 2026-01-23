@@ -22,6 +22,7 @@ func TestNewStreamClient(t *testing.T) {
 
 		client := NewStreamClient("http://localhost:8374")
 		assert.Equal(t, "http://localhost:8374", client.BaseURL())
+		assert.Equal(t, DefaultStreamPath, client.StreamPath())
 		assert.Equal(t, 5*time.Second, client.reconnectInterval)
 		assert.Equal(t, 0, client.maxReconnectAttempts)
 	})
@@ -43,12 +44,14 @@ func TestNewStreamClient(t *testing.T) {
 			WithHTTPClient(customClient),
 			WithReconnectInterval(2*time.Second),
 			WithMaxReconnectAttempts(5),
+			WithStreamPath("/custom/path"),
 		)
 
 		assert.Equal(t, "test-token", client.authToken)
 		assert.Equal(t, customClient, client.httpClient)
 		assert.Equal(t, 2*time.Second, client.reconnectInterval)
 		assert.Equal(t, 5, client.maxReconnectAttempts)
+		assert.Equal(t, "/custom/path", client.StreamPath())
 	})
 }
 
@@ -59,15 +62,32 @@ func TestStreamClientConnect(t *testing.T) {
 		t.Parallel()
 
 		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			assert.Equal(t, "/state", r.URL.Path)
+			assert.Equal(t, "HEAD", r.Method)
+			assert.Equal(t, DefaultStreamPath, r.URL.Path)
+			w.Header().Set(HeaderStreamNextOffset, "0000000000000000_0000000000000042")
 			w.WriteHeader(http.StatusOK)
-			json.NewEncoder(w).Encode(StateSnapshot{LastSeq: 10})
 		}))
 		defer server.Close()
 
 		client := NewStreamClient(server.URL)
 		err := client.Connect(context.Background())
 		require.NoError(t, err)
+		assert.Equal(t, "0000000000000000_0000000000000042", client.LastOffset())
+	})
+
+	t.Run("fails when server returns not found", func(t *testing.T) {
+		t.Parallel()
+
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusNotFound)
+			w.Write([]byte("stream not found"))
+		}))
+		defer server.Close()
+
+		client := NewStreamClient(server.URL)
+		err := client.Connect(context.Background())
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "stream not found")
 	})
 
 	t.Run("fails when server returns error", func(t *testing.T) {
@@ -99,7 +119,6 @@ func TestStreamClientConnect(t *testing.T) {
 		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			assert.Equal(t, "Bearer test-token", r.Header.Get("Authorization"))
 			w.WriteHeader(http.StatusOK)
-			json.NewEncoder(w).Encode(StateSnapshot{})
 		}))
 		defer server.Close()
 
@@ -146,7 +165,11 @@ func TestStreamClientSubscribe(t *testing.T) {
 		done := make(chan struct{})
 
 		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			if r.URL.Path == "/stream" {
+			if r.URL.Path == DefaultStreamPath {
+				assert.Equal(t, "GET", r.Method)
+				assert.Equal(t, "sse", r.URL.Query().Get("live"))
+				assert.NotEmpty(t, r.URL.Query().Get("offset"))
+
 				w.Header().Set("Content-Type", "text/event-stream")
 				w.Header().Set("Cache-Control", "no-cache")
 				w.WriteHeader(http.StatusOK)
@@ -154,11 +177,27 @@ func TestStreamClientSubscribe(t *testing.T) {
 				flusher, ok := w.(http.Flusher)
 				require.True(t, ok)
 
-				for _, event := range events {
+				// Send data event with JSON array of events
+				eventsJSON := make([]json.RawMessage, len(events))
+				for i, event := range events {
 					data, _ := event.Marshal()
-					fmt.Fprintf(w, "data: %s\n\n", string(data))
-					flusher.Flush()
+					eventsJSON[i] = data
 				}
+				arrayData, _ := json.Marshal(eventsJSON)
+
+				fmt.Fprintf(w, "event: data\n")
+				fmt.Fprintf(w, "data: %s\n\n", string(arrayData))
+				flusher.Flush()
+
+				// Send control event
+				control := map[string]interface{}{
+					"streamNextOffset": "0000000000000000_0000000000000100",
+					"upToDate":         true,
+				}
+				controlJSON, _ := json.Marshal(control)
+				fmt.Fprintf(w, "event: control\n")
+				fmt.Fprintf(w, "data: %s\n\n", string(controlJSON))
+				flusher.Flush()
 
 				// Keep connection open until test is done
 				<-done
@@ -206,11 +245,13 @@ func TestStreamClientSubscribe(t *testing.T) {
 		event.Seq = 42
 
 		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			if r.URL.Path == "/stream" {
+			if r.URL.Path == DefaultStreamPath {
 				w.Header().Set("Content-Type", "text/event-stream")
 				w.WriteHeader(http.StatusOK)
 				data, _ := event.Marshal()
-				fmt.Fprintf(w, "data: %s\n\n", string(data))
+				// Send as array (durable-streams format)
+				fmt.Fprintf(w, "event: data\n")
+				fmt.Fprintf(w, "data: [%s]\n\n", string(data))
 			}
 		}))
 		defer server.Close()
@@ -231,24 +272,26 @@ func TestStreamClientSubscribe(t *testing.T) {
 			t.Fatal("timeout")
 		}
 
-		assert.Equal(t, uint64(42), client.LastSeq())
+		// Should have assigned sequence 1 (since we start from 0)
+		assert.Equal(t, uint64(1), client.LastSeq())
 	})
 
-	t.Run("passes fromSeq parameter to server", func(t *testing.T) {
+	t.Run("passes offset parameter to server", func(t *testing.T) {
 		t.Parallel()
 
-		var receivedFromSeq string
+		var receivedOffset string
 
 		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			if r.URL.Path == "/stream" {
-				receivedFromSeq = r.URL.Query().Get("from_seq")
+			if r.URL.Path == DefaultStreamPath {
+				receivedOffset = r.URL.Query().Get("offset")
 				w.Header().Set("Content-Type", "text/event-stream")
 				w.WriteHeader(http.StatusOK)
 				// Send one event and close
 				event := MustNewEvent(MessageTypeSession, "session:sess-1", Session{ID: "sess-1"})
 				event.Seq = 10
 				data, _ := event.Marshal()
-				fmt.Fprintf(w, "data: %s\n\n", string(data))
+				fmt.Fprintf(w, "event: data\n")
+				fmt.Fprintf(w, "data: [%s]\n\n", string(data))
 			}
 		}))
 		defer server.Close()
@@ -266,14 +309,15 @@ func TestStreamClientSubscribe(t *testing.T) {
 			t.Fatal("timeout")
 		}
 
-		assert.Equal(t, "5", receivedFromSeq)
+		// With the new implementation, offset starts at "0_0" since we don't have offset tracking from seq
+		assert.Equal(t, "0_0", receivedOffset)
 	})
 
 	t.Run("closes channel when context is canceled", func(t *testing.T) {
 		t.Parallel()
 
 		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			if r.URL.Path == "/stream" {
+			if r.URL.Path == DefaultStreamPath {
 				w.Header().Set("Content-Type", "text/event-stream")
 				w.WriteHeader(http.StatusOK)
 				// Keep connection open
@@ -317,7 +361,7 @@ func TestStreamClientSubscribe(t *testing.T) {
 		var mu sync.Mutex
 
 		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			if r.URL.Path == "/stream" {
+			if r.URL.Path == DefaultStreamPath {
 				mu.Lock()
 				requestCount++
 				count := requestCount
@@ -336,7 +380,8 @@ func TestStreamClientSubscribe(t *testing.T) {
 				event := MustNewEvent(MessageTypeSession, "session:sess-1", Session{ID: "sess-1"})
 				event.Seq = 1
 				data, _ := event.Marshal()
-				fmt.Fprintf(w, "data: %s\n\n", string(data))
+				fmt.Fprintf(w, "event: data\n")
+				fmt.Fprintf(w, "data: [%s]\n\n", string(data))
 			}
 		}))
 		defer server.Close()
@@ -370,7 +415,7 @@ func TestStreamClientSubscribe(t *testing.T) {
 		var mu sync.Mutex
 
 		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			if r.URL.Path == "/stream" {
+			if r.URL.Path == DefaultStreamPath {
 				mu.Lock()
 				requestCount++
 				mu.Unlock()
@@ -418,7 +463,7 @@ func TestStreamClientSendCommand(t *testing.T) {
 		t.Parallel()
 
 		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			if r.URL.Path == "/command" {
+			if r.URL.Path == DefaultStreamPath {
 				assert.Equal(t, "POST", r.Method)
 				assert.Equal(t, "application/json", r.Header.Get("Content-Type"))
 
@@ -432,10 +477,9 @@ func TestStreamClientSendCommand(t *testing.T) {
 				assert.Equal(t, "cmd-123", cmd.ID)
 				assert.Equal(t, CommandTypeKill, cmd.Type)
 
-				// Return ack
-				ack := NewSuccessAck("cmd-123")
-				w.WriteHeader(http.StatusOK)
-				json.NewEncoder(w).Encode(ack)
+				// Return 204 No Content per durable-streams protocol
+				w.Header().Set(HeaderStreamNextOffset, "0000000000000000_0000000000000100")
+				w.WriteHeader(http.StatusNoContent)
 			}
 		}))
 		defer server.Close()
@@ -454,7 +498,7 @@ func TestStreamClientSendCommand(t *testing.T) {
 		t.Parallel()
 
 		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			if r.URL.Path == "/command" {
+			if r.URL.Path == DefaultStreamPath {
 				w.WriteHeader(http.StatusBadRequest)
 				w.Write([]byte("invalid command"))
 			}
@@ -474,10 +518,9 @@ func TestStreamClientSendCommand(t *testing.T) {
 		t.Parallel()
 
 		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			if r.URL.Path == "/command" {
+			if r.URL.Path == DefaultStreamPath {
 				assert.Equal(t, "Bearer secret-token", r.Header.Get("Authorization"))
-				w.WriteHeader(http.StatusOK)
-				json.NewEncoder(w).Encode(NewSuccessAck("cmd-1"))
+				w.WriteHeader(http.StatusNoContent)
 			}
 		}))
 		defer server.Close()
@@ -505,8 +548,7 @@ func TestStreamClientSendKillCommand(t *testing.T) {
 			assert.Equal(t, CommandTypeKill, cmd.Type)
 			assert.True(t, payload.DeleteSprite)
 
-			w.WriteHeader(http.StatusOK)
-			json.NewEncoder(w).Encode(NewSuccessAck(cmd.ID))
+			w.WriteHeader(http.StatusNoContent)
 		}))
 		defer server.Close()
 
@@ -531,8 +573,7 @@ func TestStreamClientSendBackgroundCommand(t *testing.T) {
 			assert.Equal(t, CommandTypeBackground, cmd.Type)
 			assert.Equal(t, "bg-1", cmd.ID)
 
-			w.WriteHeader(http.StatusOK)
-			json.NewEncoder(w).Encode(NewSuccessAck(cmd.ID))
+			w.WriteHeader(http.StatusNoContent)
 		}))
 		defer server.Close()
 
@@ -550,8 +591,8 @@ func TestStreamClientSendInputResponse(t *testing.T) {
 		t.Parallel()
 
 		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			// Input response is sent to /input endpoint, not /command
-			assert.Equal(t, "/input", r.URL.Path)
+			// Input response is appended to the stream via POST
+			assert.Equal(t, DefaultStreamPath, r.URL.Path)
 			assert.Equal(t, "POST", r.Method)
 
 			var event Event
@@ -566,8 +607,7 @@ func TestStreamClientSendInputResponse(t *testing.T) {
 			assert.Equal(t, "req-123", ir.RequestID)
 			assert.Equal(t, "user's response", ir.Response)
 
-			w.WriteHeader(http.StatusOK)
-			json.NewEncoder(w).Encode(NewSuccessAck(ir.ID))
+			w.WriteHeader(http.StatusNoContent)
 		}))
 		defer server.Close()
 
@@ -581,33 +621,41 @@ func TestStreamClientSendInputResponse(t *testing.T) {
 func TestStreamClientGetState(t *testing.T) {
 	t.Parallel()
 
-	t.Run("fetches state snapshot", func(t *testing.T) {
+	t.Run("fetches state snapshot by reading stream", func(t *testing.T) {
 		t.Parallel()
 
-		snapshot := StateSnapshot{
-			Session: &SessionEvent{
-				ID:        "sess-1",
-				Repo:      "owner/repo",
-				Branch:    "main",
-				Status:    SessionStatusRunning,
-				Iteration: 5,
-			},
-			Tasks: []*TaskEvent{
-				{ID: "task-1", Status: TaskStatusCompleted},
-				{ID: "task-2", Status: TaskStatusInProgress},
-			},
-			LastSeq: 42,
-			InputRequest: &InputRequestEvent{
-				ID:       "input-1",
-				Question: "What should I do?",
-			},
-		}
+		// Create events that will be returned
+		sessionEvent := MustNewEvent(MessageTypeSession, "session:sess-1", Session{
+			ID:        "sess-1",
+			Repo:      "owner/repo",
+			Branch:    "main",
+			Status:    SessionStatusRunning,
+			Iteration: 5,
+		})
+		task1Event := MustNewEvent(MessageTypeTask, "task:task-1", Task{ID: "task-1", Status: TaskStatusCompleted})
+		task2Event := MustNewEvent(MessageTypeTask, "task:task-2", Task{ID: "task-2", Status: TaskStatusInProgress})
+		inputEvent := MustNewEvent(MessageTypeInputRequest, "input_request:input-1", InputRequest{
+			ID:       "input-1",
+			Question: "What should I do?",
+		})
 
 		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			assert.Equal(t, "/state", r.URL.Path)
+			assert.Equal(t, DefaultStreamPath, r.URL.Path)
 			assert.Equal(t, "GET", r.Method)
+			assert.Equal(t, "0_0", r.URL.Query().Get("offset"))
+
+			// Return JSON array of events
+			w.Header().Set(HeaderStreamNextOffset, "0000000000000000_0000000000000200")
+			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusOK)
-			json.NewEncoder(w).Encode(snapshot)
+
+			events := []*Event{sessionEvent, task1Event, task2Event, inputEvent}
+			var rawEvents []json.RawMessage
+			for _, e := range events {
+				data, _ := e.Marshal()
+				rawEvents = append(rawEvents, data)
+			}
+			json.NewEncoder(w).Encode(rawEvents)
 		}))
 		defer server.Close()
 
@@ -618,8 +666,27 @@ func TestStreamClientGetState(t *testing.T) {
 		assert.Equal(t, "sess-1", state.Session.ID)
 		assert.Equal(t, SessionStatusRunning, state.Session.Status)
 		assert.Len(t, state.Tasks, 2)
-		assert.Equal(t, uint64(42), state.LastSeq)
+		assert.Equal(t, uint64(4), state.LastSeq)
 		assert.Equal(t, "What should I do?", state.InputRequest.Question)
+	})
+
+	t.Run("handles empty stream", func(t *testing.T) {
+		t.Parallel()
+
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set(HeaderStreamNextOffset, "0000000000000000_0000000000000000")
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK)
+			w.Write([]byte("[]"))
+		}))
+		defer server.Close()
+
+		client := NewStreamClient(server.URL)
+		state, err := client.GetState(context.Background())
+		require.NoError(t, err)
+		assert.Nil(t, state.Session)
+		assert.Empty(t, state.Tasks)
+		assert.Equal(t, uint64(0), state.LastSeq)
 	})
 
 	t.Run("handles error response", func(t *testing.T) {
@@ -627,7 +694,7 @@ func TestStreamClientGetState(t *testing.T) {
 
 		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			w.WriteHeader(http.StatusNotFound)
-			w.Write([]byte("session not found"))
+			w.Write([]byte("stream not found"))
 		}))
 		defer server.Close()
 
@@ -657,8 +724,7 @@ func TestStreamClientConcurrency(t *testing.T) {
 			receivedCommands[cmd.ID] = true
 			mu.Unlock()
 
-			w.WriteHeader(http.StatusOK)
-			json.NewEncoder(w).Encode(NewSuccessAck(cmd.ID))
+			w.WriteHeader(http.StatusNoContent)
 		}))
 		defer server.Close()
 
@@ -689,7 +755,7 @@ func TestStreamClientConcurrency(t *testing.T) {
 func TestSSEParsing(t *testing.T) {
 	t.Parallel()
 
-	t.Run("handles data without space after colon", func(t *testing.T) {
+	t.Run("handles durable-streams data event format", func(t *testing.T) {
 		t.Parallel()
 
 		event := MustNewEvent(MessageTypeSession, "session:sess-1", Session{ID: "sess-1"})
@@ -698,9 +764,10 @@ func TestSSEParsing(t *testing.T) {
 		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			w.Header().Set("Content-Type", "text/event-stream")
 			w.WriteHeader(http.StatusOK)
-			// Note: no space after "data:"
 			data, _ := event.Marshal()
-			fmt.Fprintf(w, "data:%s\n\n", string(data))
+			// Send as durable-streams format: event type, JSON array
+			fmt.Fprintf(w, "event: data\n")
+			fmt.Fprintf(w, "data:[%s]\n\n", string(data))
 		}))
 		defer server.Close()
 
@@ -719,6 +786,54 @@ func TestSSEParsing(t *testing.T) {
 		}
 	})
 
+	t.Run("handles control events", func(t *testing.T) {
+		t.Parallel()
+
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "text/event-stream")
+			w.WriteHeader(http.StatusOK)
+			flusher := w.(http.Flusher)
+
+			// Send data event first
+			event := MustNewEvent(MessageTypeSession, "session:sess-1", Session{ID: "sess-1"})
+			data, _ := event.Marshal()
+			fmt.Fprintf(w, "event: data\n")
+			fmt.Fprintf(w, "data: [%s]\n\n", string(data))
+			flusher.Flush()
+
+			// Send control event
+			control := map[string]interface{}{
+				"streamNextOffset": "0000000000000000_0000000000000100",
+				"streamCursor":     "12345",
+				"upToDate":         true,
+			}
+			controlJSON, _ := json.Marshal(control)
+			fmt.Fprintf(w, "event: control\n")
+			fmt.Fprintf(w, "data: %s\n\n", string(controlJSON))
+			flusher.Flush()
+		}))
+		defer server.Close()
+
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+
+		client := NewStreamClient(server.URL)
+		eventCh, _ := client.Subscribe(ctx, 0)
+
+		// Wait for first event
+		select {
+		case <-eventCh:
+		case <-ctx.Done():
+			t.Fatal("timeout")
+		}
+
+		// Give time for control event to be processed
+		time.Sleep(100 * time.Millisecond)
+
+		// Verify offset was updated from control event
+		assert.Equal(t, "0000000000000000_0000000000000100", client.LastOffset())
+	})
+
 	t.Run("skips malformed events", func(t *testing.T) {
 		t.Parallel()
 
@@ -731,12 +846,14 @@ func TestSSEParsing(t *testing.T) {
 			flusher := w.(http.Flusher)
 
 			// Send malformed event
-			fmt.Fprintf(w, "data: {invalid json}\n\n")
+			fmt.Fprintf(w, "event: data\n")
+			fmt.Fprintf(w, "data: [{invalid json}]\n\n")
 			flusher.Flush()
 
 			// Send valid event
 			data, _ := validEvent.Marshal()
-			fmt.Fprintf(w, "data: %s\n\n", string(data))
+			fmt.Fprintf(w, "event: data\n")
+			fmt.Fprintf(w, "data: [%s]\n\n", string(data))
 			flusher.Flush()
 		}))
 		defer server.Close()
@@ -757,7 +874,7 @@ func TestSSEParsing(t *testing.T) {
 		}
 	})
 
-	t.Run("ignores other SSE fields", func(t *testing.T) {
+	t.Run("handles single event format", func(t *testing.T) {
 		t.Parallel()
 
 		event := MustNewEvent(MessageTypeSession, "session:sess-1", Session{ID: "sess-1"})
@@ -767,10 +884,7 @@ func TestSSEParsing(t *testing.T) {
 			w.Header().Set("Content-Type", "text/event-stream")
 			w.WriteHeader(http.StatusOK)
 			data, _ := event.Marshal()
-			// Include other SSE fields
-			fmt.Fprintf(w, "event: message\n")
-			fmt.Fprintf(w, "id: 123\n")
-			fmt.Fprintf(w, "retry: 5000\n")
+			// Send single event (not array) for backward compatibility
 			fmt.Fprintf(w, "data: %s\n\n", string(data))
 		}))
 		defer server.Close()

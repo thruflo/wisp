@@ -1,5 +1,8 @@
 // Package stream provides shared types and utilities for durable stream
 // communication between wisp-sprite (on the Sprite VM) and clients (TUI/web).
+//
+// This client implements the durable-streams HTTP protocol for communicating
+// with a durable-streams server. See: https://github.com/durable-streams/durable-streams
 package stream
 
 import (
@@ -10,17 +13,40 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
 )
 
-// StreamClient provides HTTP-based access to a stream server running on a Sprite.
+const (
+	// DefaultStreamPath is the default path for the wisp event stream.
+	DefaultStreamPath = "/wisp/events"
+
+	// HeaderStreamNextOffset is the header containing the next offset after a read.
+	HeaderStreamNextOffset = "Stream-Next-Offset"
+
+	// HeaderStreamUpToDate indicates the client is at the tail of the stream.
+	HeaderStreamUpToDate = "Stream-Up-To-Date"
+
+	// HeaderStreamCursor is used for CDN cache collision prevention.
+	HeaderStreamCursor = "Stream-Cursor"
+)
+
+// StreamClient provides HTTP-based access to a durable-streams server.
 // It handles connection, subscription, command sending, and automatic reconnection
 // with catch-up on missed events.
+//
+// This client uses the durable-streams HTTP protocol:
+// - GET /{path}?offset=X&live=sse for SSE streaming
+// - POST /{path} to append events
+// - HEAD /{path} for metadata
 type StreamClient struct {
 	// baseURL is the base URL of the stream server (e.g., "http://localhost:8374")
 	baseURL string
+
+	// streamPath is the path to the stream (e.g., "/wisp/events")
+	streamPath string
 
 	// httpClient is the HTTP client used for requests
 	httpClient *http.Client
@@ -28,10 +54,14 @@ type StreamClient struct {
 	// authToken is the optional authentication token
 	authToken string
 
-	// lastSeq is the sequence number of the last event received
+	// lastOffset is the offset string of the last event received
+	lastOffset string
+
+	// lastSeq is a synthetic sequence number for backward compatibility
+	// Derived from parsing events in the stream
 	lastSeq uint64
 
-	// mu protects lastSeq
+	// mu protects lastOffset and lastSeq
 	mu sync.RWMutex
 
 	// reconnectInterval is the time to wait between reconnection attempts
@@ -39,6 +69,9 @@ type StreamClient struct {
 
 	// maxReconnectAttempts is the maximum number of reconnection attempts (0 = unlimited)
 	maxReconnectAttempts int
+
+	// cursor is used for CDN cache collision prevention in SSE mode
+	cursor string
 }
 
 // ClientOption configures a StreamClient.
@@ -73,10 +106,18 @@ func WithMaxReconnectAttempts(attempts int) ClientOption {
 	}
 }
 
+// WithStreamPath sets a custom stream path (default: "/wisp/events").
+func WithStreamPath(path string) ClientOption {
+	return func(c *StreamClient) {
+		c.streamPath = path
+	}
+}
+
 // NewStreamClient creates a new StreamClient for the given base URL.
 func NewStreamClient(baseURL string, opts ...ClientOption) *StreamClient {
 	c := &StreamClient{
-		baseURL: strings.TrimSuffix(baseURL, "/"),
+		baseURL:    strings.TrimSuffix(baseURL, "/"),
+		streamPath: DefaultStreamPath,
 		httpClient: &http.Client{
 			Timeout: 0, // No timeout for streaming connections
 		},
@@ -91,10 +132,11 @@ func NewStreamClient(baseURL string, opts ...ClientOption) *StreamClient {
 	return c
 }
 
-// Connect tests the connection to the stream server by fetching the current state.
-// Returns an error if the server is not reachable.
+// Connect tests the connection to the stream server by fetching stream metadata.
+// Returns an error if the server is not reachable or the stream doesn't exist.
 func (c *StreamClient) Connect(ctx context.Context) error {
-	req, err := http.NewRequestWithContext(ctx, "GET", c.baseURL+"/state", nil)
+	// Use HEAD request to check if stream exists per durable-streams protocol
+	req, err := http.NewRequestWithContext(ctx, "HEAD", c.baseURL+c.streamPath, nil)
 	if err != nil {
 		return fmt.Errorf("failed to create request: %w", err)
 	}
@@ -106,9 +148,19 @@ func (c *StreamClient) Connect(ctx context.Context) error {
 	}
 	defer resp.Body.Close()
 
+	if resp.StatusCode == http.StatusNotFound {
+		return fmt.Errorf("stream not found at %s", c.streamPath)
+	}
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
 		return fmt.Errorf("server returned status %d: %s", resp.StatusCode, string(body))
+	}
+
+	// Store the current offset from header
+	if offset := resp.Header.Get(HeaderStreamNextOffset); offset != "" {
+		c.mu.Lock()
+		c.lastOffset = offset
+		c.mu.Unlock()
 	}
 
 	return nil
@@ -118,7 +170,9 @@ func (c *StreamClient) Connect(ctx context.Context) error {
 // It uses Server-Sent Events (SSE) for real-time streaming and automatically
 // reconnects and catches up on missed events if the connection is lost.
 // The channel is closed when the context is canceled or max reconnect attempts are exceeded.
-// If fromSeq is 0, all events from the beginning are returned.
+//
+// fromSeq is maintained for backward compatibility. Internally we track offsets.
+// If fromSeq is 0, we start from the beginning (offset "0_0").
 func (c *StreamClient) Subscribe(ctx context.Context, fromSeq uint64) (<-chan *Event, <-chan error) {
 	eventCh := make(chan *Event, 100)
 	errCh := make(chan error, 1)
@@ -128,6 +182,7 @@ func (c *StreamClient) Subscribe(ctx context.Context, fromSeq uint64) (<-chan *E
 		c.lastSeq = fromSeq - 1
 	} else {
 		c.lastSeq = 0
+		c.lastOffset = "0_0" // Start from beginning
 	}
 	c.mu.Unlock()
 
@@ -151,10 +206,15 @@ func (c *StreamClient) subscriptionLoop(ctx context.Context, eventCh chan<- *Eve
 		}
 
 		c.mu.RLock()
-		fromSeq := c.lastSeq + 1
+		fromOffset := c.lastOffset
+		cursor := c.cursor
 		c.mu.RUnlock()
 
-		err := c.streamEvents(ctx, fromSeq, eventCh)
+		if fromOffset == "" {
+			fromOffset = "0_0"
+		}
+
+		err := c.streamEvents(ctx, fromOffset, cursor, eventCh)
 		if err == nil {
 			// Stream ended normally (context canceled)
 			return
@@ -182,9 +242,15 @@ func (c *StreamClient) subscriptionLoop(ctx context.Context, eventCh chan<- *Eve
 }
 
 // streamEvents connects to the SSE endpoint and streams events.
+// Uses durable-streams protocol: GET /{path}?offset=X&live=sse
 // Returns nil if the context is canceled, or an error if the connection fails.
-func (c *StreamClient) streamEvents(ctx context.Context, fromSeq uint64, eventCh chan<- *Event) error {
-	url := fmt.Sprintf("%s/stream?from_seq=%d", c.baseURL, fromSeq)
+func (c *StreamClient) streamEvents(ctx context.Context, fromOffset string, cursor string, eventCh chan<- *Event) error {
+	// Build URL with durable-streams SSE parameters
+	url := fmt.Sprintf("%s%s?offset=%s&live=sse", c.baseURL, c.streamPath, fromOffset)
+	if cursor != "" {
+		url += "&cursor=" + cursor
+	}
+
 	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
 	if err != nil {
 		return fmt.Errorf("failed to create request: %w", err)
@@ -208,12 +274,21 @@ func (c *StreamClient) streamEvents(ctx context.Context, fromSeq uint64, eventCh
 }
 
 // parseSSEStream parses Server-Sent Events from the response body.
+// durable-streams SSE format:
+// - event: data - contains the actual data payload
+// - event: control - contains metadata like streamNextOffset, streamCursor, upToDate
 func (c *StreamClient) parseSSEStream(ctx context.Context, body io.Reader, eventCh chan<- *Event) error {
 	scanner := bufio.NewScanner(body)
 	// Increase buffer for potentially large events
 	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
 
 	var dataLines []string
+	var eventType string
+	var seqCounter uint64
+
+	c.mu.RLock()
+	seqCounter = c.lastSeq
+	c.mu.RUnlock()
 
 	for scanner.Scan() {
 		select {
@@ -228,39 +303,48 @@ func (c *StreamClient) parseSSEStream(ctx context.Context, body io.Reader, event
 		if line == "" {
 			if len(dataLines) > 0 {
 				data := strings.Join(dataLines, "\n")
-				event, err := UnmarshalEvent([]byte(data))
-				if err != nil {
-					// Skip malformed events but continue
-					dataLines = nil
-					continue
-				}
 
-				// Update lastSeq before sending
-				c.mu.Lock()
-				if event.Seq > c.lastSeq {
-					c.lastSeq = event.Seq
-				}
-				c.mu.Unlock()
+				if eventType == "control" {
+					// Parse control event to extract offset and cursor
+					c.handleControlEvent(data)
+				} else if eventType == "data" || eventType == "" {
+					// Parse as array of events (durable-streams returns JSON arrays)
+					events, err := c.parseDataPayload(data, &seqCounter)
+					if err != nil {
+						// Skip malformed events but continue
+						dataLines = nil
+						eventType = ""
+						continue
+					}
 
-				select {
-				case <-ctx.Done():
-					return nil
-				case eventCh <- event:
+					// Send all parsed events
+					for _, event := range events {
+						select {
+						case <-ctx.Done():
+							return nil
+						case eventCh <- event:
+						}
+					}
 				}
 
 				dataLines = nil
+				eventType = ""
 			}
 			continue
 		}
 
-		// Parse SSE format: "data: {...json...}"
-		if strings.HasPrefix(line, "data: ") {
+		// Parse SSE fields
+		if strings.HasPrefix(line, "event: ") {
+			eventType = strings.TrimPrefix(line, "event: ")
+		} else if strings.HasPrefix(line, "event:") {
+			eventType = strings.TrimPrefix(line, "event:")
+		} else if strings.HasPrefix(line, "data: ") {
 			dataLines = append(dataLines, strings.TrimPrefix(line, "data: "))
 		} else if strings.HasPrefix(line, "data:") {
 			// Handle "data:" without space
 			dataLines = append(dataLines, strings.TrimPrefix(line, "data:"))
 		}
-		// Ignore other SSE fields (event:, id:, retry:) for now
+		// Ignore other SSE fields (id:, retry:) for now
 	}
 
 	if err := scanner.Err(); err != nil {
@@ -270,8 +354,90 @@ func (c *StreamClient) parseSSEStream(ctx context.Context, body io.Reader, event
 	return nil
 }
 
-// SendCommand sends a command to the stream server and waits for acknowledgment.
-// Returns the acknowledgment or an error if the command fails.
+// handleControlEvent processes a durable-streams control event.
+func (c *StreamClient) handleControlEvent(data string) {
+	var control struct {
+		StreamNextOffset string `json:"streamNextOffset"`
+		StreamCursor     string `json:"streamCursor"`
+		UpToDate         bool   `json:"upToDate"`
+	}
+	if err := json.Unmarshal([]byte(data), &control); err != nil {
+		return
+	}
+
+	c.mu.Lock()
+	if control.StreamNextOffset != "" {
+		c.lastOffset = control.StreamNextOffset
+	}
+	if control.StreamCursor != "" {
+		c.cursor = control.StreamCursor
+	}
+	c.mu.Unlock()
+}
+
+// parseDataPayload parses a data payload which may be a single event or array of events.
+func (c *StreamClient) parseDataPayload(data string, seqCounter *uint64) ([]*Event, error) {
+	trimmed := strings.TrimSpace(data)
+	if trimmed == "" || trimmed == "[]" {
+		return nil, nil
+	}
+
+	var events []*Event
+
+	// Try parsing as array first (durable-streams format)
+	if strings.HasPrefix(trimmed, "[") {
+		var rawEvents []json.RawMessage
+		if err := json.Unmarshal([]byte(trimmed), &rawEvents); err != nil {
+			// Fall back to single event parsing
+			return c.parseSingleEvent(trimmed, seqCounter)
+		}
+
+		for _, raw := range rawEvents {
+			event, err := UnmarshalEvent(raw)
+			if err != nil {
+				continue
+			}
+			*seqCounter++
+			event.Seq = *seqCounter
+
+			c.mu.Lock()
+			c.lastSeq = event.Seq
+			c.mu.Unlock()
+
+			events = append(events, event)
+		}
+		return events, nil
+	}
+
+	// Single event
+	return c.parseSingleEvent(trimmed, seqCounter)
+}
+
+// parseSingleEvent parses a single JSON event.
+func (c *StreamClient) parseSingleEvent(data string, seqCounter *uint64) ([]*Event, error) {
+	event, err := UnmarshalEvent([]byte(data))
+	if err != nil {
+		return nil, err
+	}
+
+	// Assign sequence number if not set
+	if event.Seq == 0 {
+		*seqCounter++
+		event.Seq = *seqCounter
+	} else {
+		*seqCounter = event.Seq
+	}
+
+	c.mu.Lock()
+	c.lastSeq = event.Seq
+	c.mu.Unlock()
+
+	return []*Event{event}, nil
+}
+
+// SendCommand sends a command to the stream server by appending it to the stream.
+// Per durable-streams protocol, we POST the event data to append it.
+// Returns an acknowledgment or an error if the command fails.
 func (c *StreamClient) SendCommand(ctx context.Context, cmd *Command) (*Ack, error) {
 	// Create command event using State Protocol format
 	event, err := NewCommandEvent(cmd)
@@ -284,7 +450,7 @@ func (c *StreamClient) SendCommand(ctx context.Context, cmd *Command) (*Ack, err
 		return nil, fmt.Errorf("failed to marshal command: %w", err)
 	}
 
-	req, err := http.NewRequestWithContext(ctx, "POST", c.baseURL+"/command", bytes.NewReader(data))
+	req, err := http.NewRequestWithContext(ctx, "POST", c.baseURL+c.streamPath, bytes.NewReader(data))
 	if err != nil {
 		return nil, fmt.Errorf("failed to create request: %w", err)
 	}
@@ -297,22 +463,46 @@ func (c *StreamClient) SendCommand(ctx context.Context, cmd *Command) (*Ack, err
 	}
 	defer resp.Body.Close()
 
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, fmt.Errorf("failed to read response: %w", err)
+	// Update offset from response header
+	if offset := resp.Header.Get(HeaderStreamNextOffset); offset != "" {
+		c.mu.Lock()
+		c.lastOffset = offset
+		c.mu.Unlock()
 	}
 
-	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusAccepted {
-		return nil, fmt.Errorf("server returned status %d: %s", resp.StatusCode, string(body))
+	// Durable-streams returns 204 No Content on successful append (non-producer)
+	// or 200 OK for producer appends
+	if resp.StatusCode == http.StatusNoContent {
+		// Success - create synthetic ack
+		return &Ack{
+			CommandID: cmd.ID,
+			Status:    AckStatusSuccess,
+		}, nil
 	}
 
-	// Parse acknowledgment
-	var ack Ack
-	if err := json.Unmarshal(body, &ack); err != nil {
-		return nil, fmt.Errorf("failed to parse acknowledgment: %w", err)
+	if resp.StatusCode == http.StatusOK || resp.StatusCode == http.StatusAccepted {
+		// Try to parse ack from response body
+		body, err := io.ReadAll(resp.Body)
+		if err != nil {
+			return nil, fmt.Errorf("failed to read response: %w", err)
+		}
+
+		if len(body) > 0 {
+			var ack Ack
+			if err := json.Unmarshal(body, &ack); err == nil {
+				return &ack, nil
+			}
+		}
+
+		// Success without explicit ack
+		return &Ack{
+			CommandID: cmd.ID,
+			Status:    AckStatusSuccess,
+		}, nil
 	}
 
-	return &ack, nil
+	body, _ := io.ReadAll(resp.Body)
+	return nil, fmt.Errorf("server returned status %d: %s", resp.StatusCode, string(body))
 }
 
 // SendKillCommand sends a kill command to stop the loop.
@@ -349,7 +539,7 @@ func (c *StreamClient) SendInputResponse(ctx context.Context, responseID, reques
 		return nil, fmt.Errorf("failed to marshal input response: %w", err)
 	}
 
-	req, err := http.NewRequestWithContext(ctx, "POST", c.baseURL+"/input", bytes.NewReader(data))
+	req, err := http.NewRequestWithContext(ctx, "POST", c.baseURL+c.streamPath, bytes.NewReader(data))
 	if err != nil {
 		return nil, fmt.Errorf("failed to create request: %w", err)
 	}
@@ -362,31 +552,56 @@ func (c *StreamClient) SendInputResponse(ctx context.Context, responseID, reques
 	}
 	defer resp.Body.Close()
 
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, fmt.Errorf("failed to read response: %w", err)
+	// Update offset from response header
+	if offset := resp.Header.Get(HeaderStreamNextOffset); offset != "" {
+		c.mu.Lock()
+		c.lastOffset = offset
+		c.mu.Unlock()
 	}
 
-	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusAccepted {
-		return nil, fmt.Errorf("server returned status %d: %s", resp.StatusCode, string(body))
+	// Durable-streams returns 204 No Content on successful append
+	if resp.StatusCode == http.StatusNoContent {
+		return &Ack{
+			CommandID: responseID,
+			Status:    AckStatusSuccess,
+		}, nil
 	}
 
-	// Parse acknowledgment
-	var ack Ack
-	if err := json.Unmarshal(body, &ack); err != nil {
-		return nil, fmt.Errorf("failed to parse acknowledgment: %w", err)
+	if resp.StatusCode == http.StatusOK || resp.StatusCode == http.StatusAccepted {
+		body, err := io.ReadAll(resp.Body)
+		if err != nil {
+			return nil, fmt.Errorf("failed to read response: %w", err)
+		}
+
+		if len(body) > 0 {
+			var ack Ack
+			if err := json.Unmarshal(body, &ack); err == nil {
+				return &ack, nil
+			}
+		}
+
+		return &Ack{
+			CommandID: responseID,
+			Status:    AckStatusSuccess,
+		}, nil
 	}
 
-	return &ack, nil
+	body, _ := io.ReadAll(resp.Body)
+	return nil, fmt.Errorf("server returned status %d: %s", resp.StatusCode, string(body))
 }
 
-// GetState fetches the current state snapshot from the server.
+// GetState fetches the current state snapshot from the server by reading
+// all events from the stream and reconstructing state.
 func (c *StreamClient) GetState(ctx context.Context) (*StateSnapshot, error) {
-	req, err := http.NewRequestWithContext(ctx, "GET", c.baseURL+"/state", nil)
+	// Read all events from the beginning to build state
+	url := c.baseURL + c.streamPath + "?offset=0_0"
+
+	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create request: %w", err)
 	}
 	c.addAuthHeader(req)
+	req.Header.Set("Accept", "application/json")
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
@@ -399,12 +614,80 @@ func (c *StreamClient) GetState(ctx context.Context) (*StateSnapshot, error) {
 		return nil, fmt.Errorf("server returned status %d: %s", resp.StatusCode, string(body))
 	}
 
-	var state StateSnapshot
-	if err := json.NewDecoder(resp.Body).Decode(&state); err != nil {
-		return nil, fmt.Errorf("failed to decode state: %w", err)
+	// Parse next offset to track position
+	nextOffset := resp.Header.Get(HeaderStreamNextOffset)
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read response: %w", err)
 	}
 
-	return &state, nil
+	// Parse the JSON array of events
+	var rawEvents []json.RawMessage
+	if err := json.Unmarshal(body, &rawEvents); err != nil {
+		// Might be empty or single event
+		if string(body) == "[]" || len(body) == 0 {
+			return &StateSnapshot{LastSeq: 0}, nil
+		}
+		return nil, fmt.Errorf("failed to parse events: %w", err)
+	}
+
+	// Build state from events
+	snapshot := &StateSnapshot{
+		Tasks: []*TaskEvent{},
+	}
+
+	taskByID := make(map[string]*TaskEvent)
+	var seqCounter uint64
+
+	for _, raw := range rawEvents {
+		event, err := UnmarshalEvent(raw)
+		if err != nil {
+			continue
+		}
+
+		seqCounter++
+		event.Seq = seqCounter
+
+		switch event.Type {
+		case MessageTypeSession:
+			session, err := event.SessionData()
+			if err == nil {
+				snapshot.Session = session
+			}
+		case MessageTypeTask:
+			task, err := event.TaskData()
+			if err == nil {
+				taskByID[task.ID] = task
+			}
+		case MessageTypeInputRequest:
+			input, err := event.InputRequestData()
+			if err == nil {
+				// Presence means pending (State Protocol)
+				snapshot.InputRequest = input
+			}
+		case MessageTypeInputResponse:
+			// Response received - clear pending input
+			snapshot.InputRequest = nil
+		}
+	}
+
+	// Convert tasks map to slice
+	for _, task := range taskByID {
+		snapshot.Tasks = append(snapshot.Tasks, task)
+	}
+
+	snapshot.LastSeq = seqCounter
+
+	// Update our tracking
+	c.mu.Lock()
+	c.lastSeq = seqCounter
+	if nextOffset != "" {
+		c.lastOffset = nextOffset
+	}
+	c.mu.Unlock()
+
+	return snapshot, nil
 }
 
 // LastSeq returns the sequence number of the last received event.
@@ -414,9 +697,21 @@ func (c *StreamClient) LastSeq() uint64 {
 	return c.lastSeq
 }
 
+// LastOffset returns the offset string of the last received event.
+func (c *StreamClient) LastOffset() string {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.lastOffset
+}
+
 // BaseURL returns the base URL of the stream server.
 func (c *StreamClient) BaseURL() string {
 	return c.baseURL
+}
+
+// StreamPath returns the configured stream path.
+func (c *StreamClient) StreamPath() string {
+	return c.streamPath
 }
 
 // addAuthHeader adds the authorization header if a token is configured.
@@ -426,8 +721,19 @@ func (c *StreamClient) addAuthHeader(req *http.Request) {
 	}
 }
 
+// seqFromOffset extracts a synthetic sequence number from an offset string.
+// Offset format: "readseq_byteoffset" - we use byteoffset as a proxy for sequence.
+func seqFromOffset(offset string) uint64 {
+	parts := strings.Split(offset, "_")
+	if len(parts) != 2 {
+		return 0
+	}
+	seq, _ := strconv.ParseUint(parts[1], 10, 64)
+	return seq
+}
+
 // StateSnapshot represents a point-in-time snapshot of the session state.
-// This is returned by the /state endpoint.
+// This is constructed by reading and processing all events from the stream.
 type StateSnapshot struct {
 	// Session contains the current session information.
 	Session *SessionEvent `json:"session,omitempty"`
@@ -435,7 +741,7 @@ type StateSnapshot struct {
 	// Tasks contains all current tasks.
 	Tasks []*TaskEvent `json:"tasks,omitempty"`
 
-	// LastSeq is the sequence number of the last event in the stream.
+	// LastSeq is the synthetic sequence number of the last event.
 	LastSeq uint64 `json:"last_seq"`
 
 	// InputRequest contains the current pending input request, if any.
